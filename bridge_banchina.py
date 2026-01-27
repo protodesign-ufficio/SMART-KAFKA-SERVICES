@@ -1,3 +1,20 @@
+"""
+bridge_banchina.py
+------------------
+
+Worker FastStream che consuma i topic AIS grezzi e pubblica eventi
+di analytics su `analytics_ais.raw`.
+
+Scopo della documentazione nel codice:
+- spiegare i topic Kafka usati (ingest, simulation, analytics)
+- fornire esempi di payload per gli AsyncAPI Pydantic models
+- mantenere inalterata la logica runtime (subscriber/publisher)
+
+Nota: le funzioni decorate con `@broker.publisher(...)` sono stub
+usate da FastStream per generare lo schema AsyncAPI (tipizzazione Pydantic).
+Questi stub non contengono logica di runtime e non devono essere rimossi.
+"""
+
 import asyncio
 import datetime
 import json
@@ -51,6 +68,13 @@ class IncomingVessel(BaseModel):
     mmsi: str = Field(..., description="MMSI nave")
     eta: float = Field(..., description="ETA Unix timestamp")
     source: str = Field(..., description="Data source topic (ais.raw | ais_simulation.raw)")
+    """Esempio:
+    {
+        "mmsi": "123456789",
+        "eta": 1670000000.0,
+        "source": "ais.raw"
+    }
+    """
 
 class BerthIncomingEvent(BaseModel):
     type: str = Field("berth_incoming", description="Tipo evento")
@@ -59,6 +83,16 @@ class BerthIncomingEvent(BaseModel):
     incoming_vessels: int = Field(..., description="Numero navi in arrivo")
     incoming: List[IncomingVessel] = Field(..., description="Lista navi in arrivo")
     timestamp: float = Field(..., description="Timestamp evento")
+    """Esempio payload pubblicato su `analytics_ais.raw`:
+    {
+        "type": "berth_incoming",
+        "destination": "PORTO X",
+        "window_future_min": 180,
+        "incoming_vessels": 2,
+        "incoming": [{"mmsi":"123","eta":1670000000.0,"source":"ais.raw"}],
+        "timestamp": 1670000100.0
+    }
+    """
 
 @broker.publisher(ANALYTICS_TOPIC)
 async def _doc_berth_incoming() -> BerthIncomingEvent:

@@ -1,3 +1,17 @@
+"""
+bridge_components.py
+--------------------
+
+FastStream worker che valuta l'utilizzo dei componenti macchina (engine, generator, gearbox)
+partendo dai messaggi AIS decodificati.
+
+Questo modulo espone Pydantic models usati per generare AsyncAPI:
+- `ComponentUsageEvent` -> payload pubblicato su `analytics_ais.raw`
+
+Le funzioni `@broker.publisher` sono stub per la generazione della documentazione
+AsyncAPI e non contengono logica di pubblicazione aggiuntiva.
+"""
+
 import asyncio
 import json
 import os
@@ -63,6 +77,17 @@ class ComponentUsageEvent(BaseModel):
     active: bool = Field(..., description="Componente attivo")
     source: str = Field(..., description="Data source topic (ais.raw | ais_simulation.raw)")
     timestamp: float = Field(..., description="Timestamp evento")
+    """Esempio payload per `analytics_ais.raw`:
+    {
+        "type": "component_usage",
+        "mmsi": "123456789",
+        "component": "engine_main",
+        "usage_seconds_total": 120,
+        "active": true,
+        "source": "ais.raw",
+        "timestamp": 1670000100.0
+    }
+    """
 
 @broker.publisher(OUTPUT_TOPIC)
 async def _doc_component_usage() -> ComponentUsageEvent:

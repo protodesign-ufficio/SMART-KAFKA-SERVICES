@@ -1,3 +1,31 @@
+"""
+bridge_delta_eta.py
+-------------------
+
+FastStream worker che calcola la differenza tra ETA osservata via AIS e l'ETA
+attesa (delta in minuti). Pubblica eventi `delta_eta` su `analytics_ais.raw`.
+
+Questo file contiene:
+- utilità di parsing/ricomposizione messaggi AIS multipart
+- calcolo ETA AIS e retrieval dell'ETA attesa via API (o simulazione)
+- Pydantic model `DeltaEtaEvent` usato per generare l'AsyncAPI schema
+
+Esempio di payload `DeltaEtaEvent`:
+{
+    "type": "delta_eta",
+    "mmsi": "123456789",
+    "delta_min": -12.5,
+    "destination": "PORTO X",
+    "eta": 1670000000.0,
+    "eta_expected": 1670000720.0,
+    "source": "real",
+    "timestamp": 1670000100.0
+}
+
+Le annotazioni Pydantic servono esclusivamente a rendere la documentazione
+AsyncAPI leggibile; la logica runtime non viene alterata.
+"""
+
 import asyncio
 import json
 import os
@@ -64,6 +92,18 @@ class DeltaEtaEvent(BaseModel):
     eta_expected: float = Field(..., description="ETA attesa in Unix timestamp (secondi)")
     source: Literal["real", "simulation"] = Field(..., description="Origine del messaggio AIS")
     timestamp: float = Field(..., description="Timestamp evento (Unix time, secondi)")
+    """Esempio di `DeltaEtaEvent` pubblicato su `analytics_ais.raw`:
+    {
+        "type": "delta_eta",
+        "mmsi": "123456789",
+        "delta_min": -5.0,
+        "destination": "PORTO X",
+        "eta": 1670000000.0,
+        "eta_expected": 1670000300.0,
+        "source": "real",
+        "timestamp": 1670000100.0
+    }
+    """
 
 # Publisher dichiarato SOLO per AsyncAPI (payload tipizzato -> niente Any)
 @broker.publisher(ANALYTICS_TOPIC)
