@@ -1,0 +1,6 @@
+faststream[cli,kafka]
+pyais
+pydantic<2
+kafka-python
+requests
+aiokafka
