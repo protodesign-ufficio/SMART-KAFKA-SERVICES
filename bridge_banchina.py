@@ -6,7 +6,7 @@ import os
 import time
 from collections import defaultdict
 from functools import reduce
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
@@ -50,6 +50,7 @@ app = FastStream(broker)
 class IncomingVessel(BaseModel):
     mmsi: str = Field(..., description="MMSI nave")
     eta: float = Field(..., description="ETA Unix timestamp")
+    source: str = Field(..., description="Data source topic (ais.raw | ais_simulation.raw)")
 
 class BerthIncomingEvent(BaseModel):
     type: str = Field("berth_incoming", description="Tipo evento")
@@ -70,13 +71,12 @@ async def _doc_berth_incoming() -> BerthIncomingEvent:
 state_lock = asyncio.Lock()
 
 ships_db: Dict[str, dict] = {}
-berths: Dict[str, Dict[str, float]] = defaultdict(dict)
+# berths[destination][mmsi] -> {"eta": float, "source": str}
+berths: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 
 multipart_buffer: Dict[tuple, dict] = {}
 last_cleanup = time.time()
 
-# TOPIC ATTIVO (LOGICO)
-_active_topic: str = KAFKA_TOPIC
 
 # ====================================================
 # UTILS
@@ -219,8 +219,8 @@ async def process_ais(topic: str, raw_bytes: bytes) -> None:
         if eta is not None:
             ship["eta"] = eta
 
-        if destination and ship.get("eta") is not None:
-            berths[destination][mmsi] = ship["eta"]
+            if destination and ship.get("eta") is not None:
+                berths[destination][mmsi] = {"eta": ship["eta"], "source": topic}
 
 # ====================================================
 # SUBSCRIBERS (STATICI, CORRETTI)
@@ -228,18 +228,12 @@ async def process_ais(topic: str, raw_bytes: bytes) -> None:
 
 @broker.subscriber(MAIN_TOPIC)
 async def consume_main(msg: KafkaMessage):
-    if _active_topic != MAIN_TOPIC:
-        await msg.ack()
-        return
     await process_ais(MAIN_TOPIC, msg.body)
     await msg.ack()
 
 
 @broker.subscriber(SIM_TOPIC)
 async def consume_sim(msg: KafkaMessage):
-    if _active_topic != SIM_TOPIC:
-        await msg.ack()
-        return
     await process_ais(SIM_TOPIC, msg.body)
     await msg.ack()
 
@@ -259,9 +253,9 @@ async def publisher_loop():
 
         for destination, ships in snapshot.items():
             incoming = [
-                IncomingVessel(mmsi=mmsi, eta=eta)
-                for mmsi, eta in ships.items()
-                if now < eta <= horizon
+                IncomingVessel(mmsi=mmsi, eta=info.get("eta"), source=info.get("source", MAIN_TOPIC))
+                for mmsi, info in ships.items()
+                if now < info.get("eta", 0) <= horizon
             ]
 
             incoming.sort(key=lambda x: x.eta)
@@ -283,7 +277,7 @@ async def publisher_loop():
 # ====================================================
 
 async def config_watcher():
-    global WINDOW_FUTURE_MIN, PUBLISH_INTERVAL, CONFIG_LAST_UPDATE, _active_topic
+    global WINDOW_FUTURE_MIN, PUBLISH_INTERVAL, CONFIG_LAST_UPDATE
 
     while True:
         await asyncio.sleep(120)
@@ -298,10 +292,7 @@ async def config_watcher():
             PUBLISH_INTERVAL = int(new["publish_interval"])
             CONFIG_LAST_UPDATE = last
 
-            new_topic = str(new["kafka_topic"])
-            if new_topic != _active_topic:
-                log(f"[KAFKA] active topic {_active_topic} -> {new_topic}")
-                _active_topic = new_topic
+            # kafka_topic setting is ignored because both topics are consumed concurrently
 
 # ====================================================
 # STARTUP

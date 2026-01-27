@@ -49,7 +49,7 @@ state_lock = asyncio.Lock()
 ships: Dict[str, dict] = {}
 
 # topic attivo (LOGICO, NON dinamico)
-_active_topic: str = INPUT_TOPIC
+# (non usato: processiamo entrambi i topic concurrently)
 
 # ====================================================
 # ASYNCAPI SCHEMA
@@ -61,6 +61,7 @@ class ComponentUsageEvent(BaseModel):
     component: str = Field(..., description="Nome componente")
     usage_seconds_total: int = Field(..., description="Secondi totali di utilizzo")
     active: bool = Field(..., description="Componente attivo")
+    source: str = Field(..., description="Data source topic (ais.raw | ais_simulation.raw)")
     timestamp: float = Field(..., description="Timestamp evento")
 
 @broker.publisher(OUTPUT_TOPIC)
@@ -117,7 +118,7 @@ def normalize_nmea(raw_value) -> Optional[str]:
 # CORE AIS PROCESSOR
 # ====================================================
 
-async def process_ais_message(raw_bytes: bytes) -> None:
+async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
     raw = normalize_nmea(raw_bytes)
     if not raw:
         return
@@ -144,10 +145,12 @@ async def process_ais_message(raw_bytes: bytes) -> None:
                     c: {"usage_total": 0.0, "active": False}
                     for c in COMPONENTS
                 },
+                "source": topic,
             },
         )
 
         ship["ais"] = data
+        ship["source"] = topic
         update_component_usage(ship, now)
 
 # ====================================================
@@ -156,21 +159,13 @@ async def process_ais_message(raw_bytes: bytes) -> None:
 
 @broker.subscriber(MAIN_TOPIC)
 async def consume_main(msg: KafkaMessage):
-    if _active_topic != MAIN_TOPIC:
-        await msg.ack()
-        return
-
-    await process_ais_message(msg.body)
+    await process_ais_message(MAIN_TOPIC, msg.body)
     await msg.ack()
 
 
 @broker.subscriber(SIM_TOPIC)
 async def consume_sim(msg: KafkaMessage):
-    if _active_topic != SIM_TOPIC:
-        await msg.ack()
-        return
-
-    await process_ais_message(msg.body)
+    await process_ais_message(SIM_TOPIC, msg.body)
     await msg.ack()
 
 # ====================================================
@@ -185,19 +180,22 @@ async def publish_loop():
         async with state_lock:
             snapshot = {
                 mmsi: {
-                    c: dict(state)
-                    for c, state in ship["components"].items()
+                    "components": {c: dict(state) for c, state in ship["components"].items()},
+                    "source": ship.get("source", INPUT_TOPIC),
                 }
                 for mmsi, ship in ships.items()
             }
 
-        for mmsi, components in snapshot.items():
+        for mmsi, data in snapshot.items():
+            components = data["components"]
+            source = data.get("source", INPUT_TOPIC)
             for component, state in components.items():
                 event = ComponentUsageEvent(
                     mmsi=mmsi,
                     component=component,
                     usage_seconds_total=int(state["usage_total"]),
                     active=state["active"],
+                    source=source,
                     timestamp=now,
                 )
 
@@ -208,7 +206,7 @@ async def publish_loop():
 # ====================================================
 
 async def config_watcher():
-    global PUBLISH_INTERVAL_SEC, CONFIG_LAST_UPDATE, _active_topic
+    global PUBLISH_INTERVAL_SEC, CONFIG_LAST_UPDATE
 
     while True:
         await asyncio.sleep(120)
@@ -220,16 +218,13 @@ async def config_watcher():
             print(
                 f"[CONFIG] update: "
                 f"PUBLISH_INTERVAL {PUBLISH_INTERVAL_SEC} -> {new_config['publish_interval']}, "
-                f"TOPIC {_active_topic} -> {new_config['kafka_topic']}"
+                f"TOPIC {INPUT_TOPIC} -> {new_config['kafka_topic']}"
             )
 
             PUBLISH_INTERVAL_SEC = int(new_config["publish_interval"])
             CONFIG_LAST_UPDATE = last_update
 
-            new_topic = str(new_config["kafka_topic"])
-            if new_topic != _active_topic:
-                print(f"[KAFKA] active topic {_active_topic} -> {new_topic}")
-                _active_topic = new_topic
+            # kafka_topic setting is ignored: both MAIN_TOPIC and SIM_TOPIC are consumed
 
 # ====================================================
 # STARTUP
