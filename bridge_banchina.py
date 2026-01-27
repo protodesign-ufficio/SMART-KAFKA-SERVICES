@@ -45,7 +45,7 @@ config = load_kafka_config_from_dashboard()
 WINDOW_FUTURE_MIN: int = int(config["window_future"])
 PUBLISH_INTERVAL: int = int(config["publish_interval"])
 CONFIG_LAST_UPDATE: float = float(config.get("last_update", time.time()))
-KAFKA_TOPIC: str = str(config["kafka_topic"])
+#KAFKA_TOPIC: str = str(config["kafka_topic"])
 
 BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "87.26.178.190:29092")
 ANALYTICS_TOPIC = "analytics_ais.raw"

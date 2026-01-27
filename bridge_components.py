@@ -43,7 +43,7 @@ BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "87.26.178.190:29092")
 MAIN_TOPIC = "ais.raw"
 SIM_TOPIC = "ais_simulation.raw"
 
-INPUT_TOPIC: str = str(config.get("kafka_topic", MAIN_TOPIC))
+#INPUT_TOPIC: str = str(config.get("kafka_topic", MAIN_TOPIC))
 OUTPUT_TOPIC = "analytics_ais.raw"
 
 COMPONENTS = ["engine_main", "generator", "gearbox"]
@@ -143,8 +143,13 @@ def normalize_nmea(raw_value) -> Optional[str]:
 # CORE AIS PROCESSOR
 # ====================================================
 
-async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
-    raw = normalize_nmea(raw_bytes)
+async def process_ais_message(msg: KafkaMessage) -> None:
+    """Processa un `KafkaMessage` e salva il topic sorgente in `ship["source"]`.
+
+    This ensures the published `ComponentUsageEvent` includes the actual origin
+    topic (e.g. `ais.raw` or `ais_simulation.raw`).
+    """
+    raw = normalize_nmea(msg.body)
     if not raw:
         return
 
@@ -159,6 +164,7 @@ async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
         return
 
     now = time.time()
+    source_topic = getattr(msg, "topic", MAIN_TOPIC)
 
     async with state_lock:
         ship = ships.setdefault(
@@ -166,16 +172,13 @@ async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
             {
                 "ais": {},
                 "last_update_ts": now,
-                "components": {
-                    c: {"usage_total": 0.0, "active": False}
-                    for c in COMPONENTS
-                },
-                "source": topic,
-            },
+                "components": {c: {"usage_total": 0.0, "active": False} for c in COMPONENTS},
+                "source": source_topic,
+            }, 
         )
 
         ship["ais"] = data
-        ship["source"] = topic
+        ship["source"] = source_topic
         update_component_usage(ship, now)
 
 # ====================================================
@@ -184,13 +187,13 @@ async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
 
 @broker.subscriber(MAIN_TOPIC)
 async def consume_main(msg: KafkaMessage):
-    await process_ais_message(MAIN_TOPIC, msg.body)
+    await process_ais_message(msg)
     await msg.ack()
 
 
 @broker.subscriber(SIM_TOPIC)
 async def consume_sim(msg: KafkaMessage):
-    await process_ais_message(SIM_TOPIC, msg.body)
+    await process_ais_message(msg)
     await msg.ack()
 
 # ====================================================
@@ -206,14 +209,14 @@ async def publish_loop():
             snapshot = {
                 mmsi: {
                     "components": {c: dict(state) for c, state in ship["components"].items()},
-                    "source": ship.get("source", INPUT_TOPIC),
+                    "source": ship.get("source"),
                 }
                 for mmsi, ship in ships.items()
             }
 
         for mmsi, data in snapshot.items():
             components = data["components"]
-            source = data.get("source", INPUT_TOPIC)
+            source = data.get("source")
             for component, state in components.items():
                 event = ComponentUsageEvent(
                     mmsi=mmsi,
@@ -243,7 +246,7 @@ async def config_watcher():
             print(
                 f"[CONFIG] update: "
                 f"PUBLISH_INTERVAL {PUBLISH_INTERVAL_SEC} -> {new_config['publish_interval']}, "
-                f"TOPIC {INPUT_TOPIC} -> {new_config['kafka_topic']}"
+                #f"TOPIC -> {new_config['kafka_topic']}"
             )
 
             PUBLISH_INTERVAL_SEC = int(new_config["publish_interval"])
