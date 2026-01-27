@@ -16,7 +16,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Tuple
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
@@ -43,7 +43,6 @@ BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "87.26.178.190:29092")
 MAIN_TOPIC = "ais.raw"
 SIM_TOPIC = "ais_simulation.raw"
 
-#INPUT_TOPIC: str = str(config.get("kafka_topic", MAIN_TOPIC))
 OUTPUT_TOPIC = "analytics_ais.raw"
 
 COMPONENTS = ["engine_main", "generator", "gearbox"]
@@ -60,10 +59,10 @@ app = FastStream(broker)
 # ====================================================
 
 state_lock = asyncio.Lock()
-ships: Dict[str, dict] = {}
 
-# topic attivo (LOGICO, NON dinamico)
-# (non usato: processiamo entrambi i topic concurrently)
+# CHIAVE STATO: (source_topic, mmsi)
+ShipKey = Tuple[str, str]
+ships: Dict[ShipKey, dict] = {}
 
 # ====================================================
 # ASYNCAPI SCHEMA
@@ -144,10 +143,10 @@ def normalize_nmea(raw_value) -> Optional[str]:
 # ====================================================
 
 async def process_ais_message(msg: KafkaMessage) -> None:
-    """Processa un `KafkaMessage` e salva il topic sorgente in `ship["source"]`.
+    """Processa un `KafkaMessage`.
 
-    This ensures the published `ComponentUsageEvent` includes the actual origin
-    topic (e.g. `ais.raw` or `ais_simulation.raw`).
+    DIFFERENZA CHIAVE: lo stato è indicizzato da (topic_sorgente, mmsi)
+    così reale e simulato con stesso MMSI restano separati.
     """
     raw = normalize_nmea(msg.body)
     if not raw:
@@ -166,19 +165,21 @@ async def process_ais_message(msg: KafkaMessage) -> None:
     now = time.time()
     source_topic = getattr(msg, "topic", MAIN_TOPIC)
 
+    key: ShipKey = (source_topic, mmsi)
+
     async with state_lock:
         ship = ships.setdefault(
-            mmsi,
+            key,
             {
                 "ais": {},
                 "last_update_ts": now,
                 "components": {c: {"usage_total": 0.0, "active": False} for c in COMPONENTS},
-                "source": source_topic,
-            }, 
+                "source": source_topic,  # ora è stabile, perché la key include il topic
+                "mmsi": mmsi,
+            },
         )
 
         ship["ais"] = data
-        ship["source"] = source_topic
         update_component_usage(ship, now)
 
 # ====================================================
@@ -207,16 +208,19 @@ async def publish_loop():
 
         async with state_lock:
             snapshot = {
-                mmsi: {
+                key: {
+                    "mmsi": ship.get("mmsi"),
                     "components": {c: dict(state) for c, state in ship["components"].items()},
                     "source": ship.get("source"),
                 }
-                for mmsi, ship in ships.items()
+                for key, ship in ships.items()
             }
 
-        for mmsi, data in snapshot.items():
+        for key, data in snapshot.items():
+            mmsi = data["mmsi"]
             components = data["components"]
-            source = data.get("source")
+            source = data.get("source") or key[0]
+
             for component, state in components.items():
                 event = ComponentUsageEvent(
                     mmsi=mmsi,
@@ -246,13 +250,10 @@ async def config_watcher():
             print(
                 f"[CONFIG] update: "
                 f"PUBLISH_INTERVAL {PUBLISH_INTERVAL_SEC} -> {new_config['publish_interval']}, "
-                #f"TOPIC -> {new_config['kafka_topic']}"
             )
 
             PUBLISH_INTERVAL_SEC = int(new_config["publish_interval"])
             CONFIG_LAST_UPDATE = last_update
-
-            # kafka_topic setting is ignored: both MAIN_TOPIC and SIM_TOPIC are consumed
 
 # ====================================================
 # STARTUP

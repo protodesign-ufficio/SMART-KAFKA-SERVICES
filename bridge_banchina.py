@@ -80,7 +80,17 @@ class BerthIncomingEvent(BaseModel):
     type: str = Field("berth_incoming", description="Tipo evento")
     destination: str = Field(..., description="Destinazione / banchina")
     window_future_min: int = Field(..., description="Finestra temporale (min)")
-    incoming_vessels: int = Field(..., description="Numero navi in arrivo")
+
+    incoming_vessels: int = Field(..., description="Numero navi totali in arrivo")
+
+    # NUOVI CAMPI (con default -> non required)
+    incoming_vessels_real: int = Field(
+        0, description="Numero navi reali in arrivo (source=ais.raw)"
+    )
+    incoming_vessels_sim: int = Field(
+        0, description="Numero navi simulate in arrivo (source=ais_simulation.raw)"
+    )
+
     incoming: List[IncomingVessel] = Field(..., description="Lista navi in arrivo")
     timestamp: float = Field(..., description="Timestamp evento")
     """Esempio payload pubblicato su `analytics_ais.raw`:
@@ -88,11 +98,17 @@ class BerthIncomingEvent(BaseModel):
         "type": "berth_incoming",
         "destination": "PORTO X",
         "window_future_min": 180,
-        "incoming_vessels": 2,
-        "incoming": [{"mmsi":"123","eta":1670000000.0,"source":"ais.raw"}],
+        "incoming_vessels": 3,
+        "incoming_vessels_real": 2,
+        "incoming_vessels_sim": 1,
+        "incoming": [
+            {"mmsi":"123","eta":1670000000.0,"source":"ais.raw"},
+            {"mmsi":"123","eta":1670000300.0,"source":"ais_simulation.raw"}
+        ],
         "timestamp": 1670000100.0
     }
     """
+
 
 @broker.publisher(ANALYTICS_TOPIC)
 async def _doc_berth_incoming() -> BerthIncomingEvent:
@@ -287,20 +303,26 @@ async def publisher_loop():
 
         for destination, ships in snapshot.items():
             incoming = [
-                IncomingVessel(mmsi=mmsi, eta=info.get("eta"), source=info.get("source", MAIN_TOPIC))
+                IncomingVessel(mmsi=mmsi, eta=info.get("eta"), source=info.get("source"))
                 for mmsi, info in ships.items()
                 if now < info.get("eta", 0) <= horizon
             ]
 
             incoming.sort(key=lambda x: x.eta)
 
+            real_count = sum(1 for v in incoming if v.source == MAIN_TOPIC)
+            sim_count = sum(1 for v in incoming if v.source == SIM_TOPIC)
+
             event = BerthIncomingEvent(
                 destination=destination,
                 window_future_min=WINDOW_FUTURE_MIN,
                 incoming_vessels=len(incoming),
+                incoming_vessels_real=real_count,
+                incoming_vessels_sim=sim_count,
                 incoming=incoming,
                 timestamp=now,
             )
+
 
             await broker.publish(event, topic=ANALYTICS_TOPIC)
 
