@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir kafka-python pyais requests
+
+COPY decoder_ais.py /app/decoder_ais.py
+COPY config_loader.py /app/config_loader.py
+
+
+CMD ["python", "-u", "decoder_ais.py"]

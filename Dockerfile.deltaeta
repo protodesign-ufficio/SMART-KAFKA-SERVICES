@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Dipendenze Python
+RUN pip install --no-cache-dir \
+    faststream[kafka,cli] \
+    pyais \
+    requests
+
+# Copia codice
+COPY bridge_delta_eta.py /app/bridge_delta_eta.py
+COPY config_loader.py /app/config_loader.py
+
+# Avvio FastStream worker
+CMD ["faststream", "run", "bridge_delta_eta:app"]

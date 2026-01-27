@@ -1,0 +1,356 @@
+import asyncio
+import json
+import os
+import time
+import datetime
+import operator
+from functools import reduce
+from typing import Dict, Literal, Optional
+
+import requests
+from faststream import FastStream
+from faststream.kafka import KafkaBroker, KafkaMessage
+from pydantic import BaseModel, Field
+from pyais import decode as ais_decode
+from datetime import datetime as dt, timedelta
+import logging
+
+logging.getLogger("faststream").setLevel(logging.WARNING)
+
+
+# ====================================================
+# CONFIG
+# ====================================================
+
+BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
+
+MAIN_TOPIC = "ais.raw"
+SIM_TOPIC = "ais_simulation.raw"
+
+ANALYTICS_TOPIC = "analytics_ais.raw"
+API_BASE = "http://87.26.178.190:15080"
+
+# ====================================================
+# FASTSTREAM
+# ====================================================
+
+broker = KafkaBroker(
+    BOOTSTRAP_SERVERS,
+    #auto_offset_reset="latest",
+)
+app = FastStream(broker)
+
+# ====================================================
+# STATE
+# ====================================================
+
+state_lock = asyncio.Lock()
+
+ships_db: Dict[str, dict] = {}
+multipart_buffer: Dict[tuple, dict] = {}
+simulation_state: Dict[str, dict] = {}
+last_cleanup = time.time()
+
+# ====================================================
+# ASYNCAPI SCHEMA (documentazione leggibile)
+# ====================================================
+
+class DeltaEtaEvent(BaseModel):
+    type: Literal["delta_eta"] = Field("delta_eta", description="Tipo evento")
+    mmsi: str = Field(..., description="MMSI nave (come ricevuto da AIS)")
+    delta_min: float = Field(..., description="Delta ETA = ETA AIS - ETA attesa (minuti)")
+    destination: str = Field(..., description="Destinazione AIS (normalizzata o UNKNOWN)")
+    eta: float = Field(..., description="ETA AIS in Unix timestamp (secondi)")
+    eta_expected: float = Field(..., description="ETA attesa in Unix timestamp (secondi)")
+    source: Literal["real", "simulation"] = Field(..., description="Origine del messaggio AIS")
+    timestamp: float = Field(..., description="Timestamp evento (Unix time, secondi)")
+
+# Publisher dichiarato SOLO per AsyncAPI (payload tipizzato -> niente Any)
+@broker.publisher(ANALYTICS_TOPIC)
+async def _doc_delta_eta() -> DeltaEtaEvent:
+    ...
+
+# ====================================================
+# UTILS
+# ====================================================
+
+def normalize_nmea(raw_value) -> Optional[str]:
+    try:
+        if isinstance(raw_value, bytes):
+            raw_value = raw_value.decode("utf-8", errors="ignore")
+
+        raw_value = raw_value.strip()
+
+        if raw_value.startswith("{"):
+            try:
+                data = json.loads(raw_value)
+                if "fields" in data and "value" in data["fields"]:
+                    return data["fields"]["value"]
+            except Exception:
+                pass
+
+        if raw_value.startswith("!AIVDM"):
+            return raw_value
+
+        if "!" in raw_value:
+            return raw_value[raw_value.find("!") :]
+
+        return None
+    except Exception:
+        return None
+
+
+def compute_checksum(nmea_str_no_checksum: str) -> str:
+    content = nmea_str_no_checksum[1:] if nmea_str_no_checksum.startswith("!") else nmea_str_no_checksum
+    return f"{reduce(operator.xor, (ord(c) for c in content), 0):02X}"
+
+
+def handle_multipart(topic: str, parts) -> Optional[str]:
+    """
+    Ricompone messaggi AIS multipart (AIVDM n>1) usando una bufferizzazione per (topic, channel, seq).
+    """
+    try:
+        total = int(parts[1])
+        index = int(parts[2])
+        seq = parts[3] or "0"
+        chan = parts[4]
+        payload = parts[5]
+
+        key = (topic, chan, seq)
+        entry = multipart_buffer.setdefault(key, {"total": total, "parts": {}, "ts": time.time()})
+
+        entry["parts"][index] = payload
+        entry["ts"] = time.time()
+
+        if len(entry["parts"]) == total:
+            full = "".join(entry["parts"][i] for i in range(1, total + 1))
+            del multipart_buffer[key]
+
+            body = f"AIVDM,1,1,,{chan},{full},0"
+            chk = compute_checksum(body)
+            return f"!{body}*{chk}"
+    except Exception:
+        return None
+
+    return None
+
+
+def calculate_eta_timestamp(decoded: dict) -> Optional[float]:
+    """
+    Estrae ETA da campi AIS (eta_month/day/hour/minute) con fallback a month/day/hour/minute.
+    Ritorna Unix timestamp (secondi) oppure None se non disponibile/valida.
+    """
+    try:
+        def get_int(key: str, default: int = 0) -> int:
+            v = decoded.get(key, default)
+            try:
+                return int(v)
+            except Exception:
+                return default
+
+        month = get_int("eta_month") or get_int("month")
+        day = get_int("eta_day") or get_int("day")
+        hour = get_int("eta_hour", 24)
+        minute = get_int("eta_minute", 60)
+
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+
+        hour = hour if hour < 24 else 0
+        minute = minute if minute < 60 else 0
+
+        now = datetime.datetime.now()
+        year = now.year + (1 if now.month == 12 and month == 1 else 0)
+
+        return datetime.datetime(year, month, day, hour, minute).timestamp()
+    except Exception:
+        return None
+
+
+def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
+    """
+    ETA attesa "reale": ricavata da API con partenza schedulata + tempo_percorrenza.
+    """
+    try:
+        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+        if r.status_code != 200:
+            return None
+
+        percorso = r.json().get("percorso")
+        if not percorso:
+            return None
+
+        partenza = percorso.get("orario_partenza_schedulato")
+        durata_min = percorso.get("tempo_percorrenza")
+
+        if not partenza or durata_min is None:
+            return None
+
+        return (dt.fromisoformat(partenza) + timedelta(minutes=float(durata_min))).timestamp()
+    except Exception:
+        return None
+
+
+def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
+    """
+    ETA attesa "simulazione": start_ts (quando arriva il primo messaggio simulato del MMSI)
+    + tempo_percorrenza (API) in minuti.
+    """
+    try:
+        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+        if r.status_code != 200:
+            return None
+
+        durata_min = r.json().get("percorso", {}).get("tempo_percorrenza")
+        if durata_min is None:
+            return None
+
+        return start_ts + float(durata_min) * 60
+    except Exception:
+        return None
+
+
+def cleanup_multipart_buffer() -> None:
+    """
+    Elimina ricomposizioni multipart stale per evitare crescita indefinita.
+    """
+    global last_cleanup
+    now = time.time()
+    if now - last_cleanup <= 10:
+        return
+
+    for k, v in list(multipart_buffer.items()):
+        if now - v["ts"] > 5:
+            del multipart_buffer[k]
+    last_cleanup = now
+
+
+# ====================================================
+# CORE PROCESSOR (usato da entrambi i subscriber)
+# ====================================================
+
+async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simulation"]) -> None:
+    """
+    Processa un messaggio AIS da uno specifico flusso (real/simulation) e pubblica DeltaEtaEvent
+    su ANALYTICS_TOPIC quando:
+      - mmsi valido
+      - non ghost (mmsi non inizia con '50')
+      - ETA AIS disponibile
+      - ETA attesa calcolabile (API o simulazione)
+    """
+    cleanup_multipart_buffer()
+
+    raw = normalize_nmea(msg.body)
+    if not raw or not raw.startswith("!"):
+        await msg.ack()
+        return
+
+    parts = raw.split(",")
+    final = raw
+
+    # multipart
+    if len(parts) > 5:
+        try:
+            total = int(parts[1])
+            if total > 1:
+                final = handle_multipart(msg.topic, parts)
+        except Exception:
+            final = None
+
+    if not final:
+        await msg.ack()
+        return
+
+    try:
+        decoded = ais_decode(final)
+        data = decoded.asdict() if hasattr(decoded, "asdict") else dict(decoded)
+
+        mmsi = str(data.get("mmsi") or "")
+        if not mmsi:
+            await msg.ack()
+            return
+
+        # ghost logic invariata
+        is_ghost = mmsi.startswith("50")
+        if is_ghost:
+            await msg.ack()
+            return
+
+        eta = calculate_eta_timestamp(data)
+        if eta is None:
+            await msg.ack()
+            return
+
+        # aggiorna stato nave (destinazione ecc.)
+        async with state_lock:
+            ship = ships_db.setdefault(mmsi, {"mmsi": mmsi})
+            ship.update(data)
+
+            destination = ship.get("destination") or "UNKNOWN"
+            if isinstance(destination, str):
+                destination = " ".join(destination.strip().upper().split()) or "UNKNOWN"
+            ship["destination"] = destination
+
+            # calcolo expected ETA in base alla sorgente
+            if source == "real":
+                expected_eta = get_expected_eta_from_api(mmsi)
+
+            else:  # source == "simulation"
+                sim = simulation_state.get(mmsi)
+                if not sim:
+                    start_ts = time.time()
+                    expected_eta = get_simulation_expected_eta(mmsi, start_ts)
+                    if expected_eta is None:
+                        await msg.ack()
+                        return
+
+                    simulation_state[mmsi] = {"start_ts": start_ts, "expected_eta": expected_eta}
+                else:
+                    expected_eta = sim["expected_eta"]
+
+        if expected_eta is None:
+            await msg.ack()
+            return
+
+        delta_min = (eta - expected_eta) / 60.0
+
+        event = DeltaEtaEvent(
+            mmsi=mmsi,
+            delta_min=delta_min,
+            destination=ship.get("destination", "UNKNOWN"),
+            eta=eta,
+            eta_expected=expected_eta,
+            source=source,
+            timestamp=time.time(),
+        )
+        print(f"[DELTA ETA] {event.json()}")
+
+        await broker.publish(event, topic=ANALYTICS_TOPIC)
+        await msg.ack()
+
+    except Exception as e:
+        print("[DELTA ETA ERROR]", e)
+        await msg.nack()
+
+
+# ====================================================
+# SUBSCRIBERS (UNO PER TOPIC) - MODIFICA SOSTANZIALE
+# ====================================================
+
+@broker.subscriber(MAIN_TOPIC)
+async def ais_consumer_real(msg: KafkaMessage):
+    await process_ais_message(msg, source="real")
+
+
+@broker.subscriber(SIM_TOPIC)
+async def ais_consumer_sim(msg: KafkaMessage):
+    await process_ais_message(msg, source="simulation")
+
+
+# ====================================================
+# STARTUP
+# ====================================================
+
+@app.on_startup
+async def startup():
+    print("[delta-eta] FastStream worker started (real + simulation)")
