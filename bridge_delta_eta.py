@@ -294,6 +294,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             return
 
         eta = calculate_eta_timestamp(data)
+        print(f"[DELTA ETA] MMSI={mmsi} ETA={eta} SOURCE={source} TOPIC={topic}")
         if eta is None:
             await msg.ack()
             return
