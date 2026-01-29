@@ -261,6 +261,9 @@ async def process_ais(topic: str, raw_bytes: bytes) -> None:
         destination = " ".join(destination.strip().upper().split())
 
     eta = calculate_eta_timestamp(data)
+    #print(f"[BANCHINA] MMSI={mmsi} ETA={eta} DEST={destination} TOPIC={topic}")
+    #if eta is None:
+        #print(f"[DROP] ETA AIS mancante o non valida | MMSI={mmsi} | keys={list(data.keys())}")
 
     async with state_lock:
         ship = ships_db.setdefault(mmsi, {})

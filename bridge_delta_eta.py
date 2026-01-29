@@ -5,23 +5,6 @@ bridge_delta_eta.py
 FastStream worker che calcola la differenza tra ETA osservata via AIS e l'ETA
 attesa (delta in minuti). Pubblica eventi `delta_eta` su `analytics_ais.raw`.
 
-Questo file contiene:
-- utilità di parsing/ricomposizione messaggi AIS multipart
-- calcolo ETA AIS e retrieval dell'ETA attesa via API (o simulazione)
-- Pydantic model `DeltaEtaEvent` usato per generare l'AsyncAPI schema
-
-Esempio di payload `DeltaEtaEvent`:
-{
-    "type": "delta_eta",
-    "mmsi": "123456789",
-    "delta_min": -12.5,
-    "destination": "PORTO X",
-    "eta": 1670000000.0,
-    "eta_expected": 1670000720.0,
-    "source": "real",
-    "timestamp": 1670000100.0
-}
-
 Le annotazioni Pydantic servono esclusivamente a rendere la documentazione
 AsyncAPI leggibile; la logica runtime non viene alterata.
 """
@@ -33,7 +16,7 @@ import time
 import datetime
 import operator
 from functools import reduce
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Tuple
 
 import requests
 from faststream import FastStream
@@ -62,10 +45,7 @@ API_BASE = "http://87.26.178.190:15080"
 # FASTSTREAM
 # ====================================================
 
-broker = KafkaBroker(
-    BOOTSTRAP_SERVERS,
-    #auto_offset_reset="latest",
-)
+broker = KafkaBroker(BOOTSTRAP_SERVERS)
 app = FastStream(broker)
 
 # ====================================================
@@ -74,9 +54,15 @@ app = FastStream(broker)
 
 state_lock = asyncio.Lock()
 
-ships_db: Dict[str, dict] = {}
+# CHIAVE STATO: (topic_sorgente, mmsi)
+ShipKey = Tuple[str, str]
+
+ships_db: Dict[ShipKey, dict] = {}
 multipart_buffer: Dict[tuple, dict] = {}
-simulation_state: Dict[str, dict] = {}
+
+# anche la simulation_state diventa per-(topic,mmsi) (così è coerente e future-proof)
+simulation_state: Dict[ShipKey, dict] = {}
+
 last_cleanup = time.time()
 
 # ====================================================
@@ -92,7 +78,7 @@ class DeltaEtaEvent(BaseModel):
     eta_expected: float = Field(..., description="ETA attesa in Unix timestamp (secondi)")
     source: Literal["real", "simulation"] = Field(..., description="Origine del messaggio AIS")
     timestamp: float = Field(..., description="Timestamp evento (Unix time, secondi)")
-    """Esempio di `DeltaEtaEvent` pubblicato su `analytics_ais.raw`:
+    """Esempio:
     {
         "type": "delta_eta",
         "mmsi": "123456789",
@@ -105,7 +91,6 @@ class DeltaEtaEvent(BaseModel):
     }
     """
 
-# Publisher dichiarato SOLO per AsyncAPI (payload tipizzato -> niente Any)
 @broker.publisher(ANALYTICS_TOPIC)
 async def _doc_delta_eta() -> DeltaEtaEvent:
     ...
@@ -233,8 +218,7 @@ def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
 
 def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
     """
-    ETA attesa "simulazione": start_ts (quando arriva il primo messaggio simulato del MMSI)
-    + tempo_percorrenza (API) in minuti.
+    ETA attesa "simulazione": start_ts + tempo_percorrenza (API) in minuti.
     """
     try:
         r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
@@ -266,24 +250,18 @@ def cleanup_multipart_buffer() -> None:
 
 
 # ====================================================
-# CORE PROCESSOR (usato da entrambi i subscriber)
+# CORE PROCESSOR
 # ====================================================
 
 async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simulation"]) -> None:
-    """
-    Processa un messaggio AIS da uno specifico flusso (real/simulation) e pubblica DeltaEtaEvent
-    su ANALYTICS_TOPIC quando:
-      - mmsi valido
-      - non ghost (mmsi non inizia con '50')
-      - ETA AIS disponibile
-      - ETA attesa calcolabile (API o simulazione)
-    """
     cleanup_multipart_buffer()
 
     raw = normalize_nmea(msg.body)
     if not raw or not raw.startswith("!"):
         await msg.ack()
         return
+
+    topic = getattr(msg, "topic", MAIN_TOPIC)
 
     parts = raw.split(",")
     final = raw
@@ -293,7 +271,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         try:
             total = int(parts[1])
             if total > 1:
-                final = handle_multipart(msg.topic, parts)
+                final = handle_multipart(topic, parts)
         except Exception:
             final = None
 
@@ -311,8 +289,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             return
 
         # ghost logic invariata
-        is_ghost = mmsi.startswith("50")
-        if is_ghost:
+        if mmsi.startswith("50"):
             await msg.ack()
             return
 
@@ -321,30 +298,34 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             await msg.ack()
             return
 
-        # aggiorna stato nave (destinazione ecc.)
+        key: ShipKey = (topic, mmsi)
+
+        # variabili locali da usare fuori lock (evitiamo di leggere ship dopo che altri thread lo mutano)
+        destination_norm = "UNKNOWN"
+        expected_eta: Optional[float] = None
+
         async with state_lock:
-            ship = ships_db.setdefault(mmsi, {"mmsi": mmsi})
+            ship = ships_db.setdefault(key, {"mmsi": mmsi, "topic": topic})
             ship.update(data)
 
             destination = ship.get("destination") or "UNKNOWN"
             if isinstance(destination, str):
                 destination = " ".join(destination.strip().upper().split()) or "UNKNOWN"
             ship["destination"] = destination
+            destination_norm = destination
 
             # calcolo expected ETA in base alla sorgente
             if source == "real":
                 expected_eta = get_expected_eta_from_api(mmsi)
-
-            else:  # source == "simulation"
-                sim = simulation_state.get(mmsi)
+            else:
+                sim = simulation_state.get(key)
                 if not sim:
                     start_ts = time.time()
                     expected_eta = get_simulation_expected_eta(mmsi, start_ts)
                     if expected_eta is None:
                         await msg.ack()
                         return
-
-                    simulation_state[mmsi] = {"start_ts": start_ts, "expected_eta": expected_eta}
+                    simulation_state[key] = {"start_ts": start_ts, "expected_eta": expected_eta}
                 else:
                     expected_eta = sim["expected_eta"]
 
@@ -357,13 +338,13 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         event = DeltaEtaEvent(
             mmsi=mmsi,
             delta_min=delta_min,
-            destination=ship.get("destination", "UNKNOWN"),
+            destination=destination_norm,
             eta=eta,
             eta_expected=expected_eta,
             source=source,
             timestamp=time.time(),
         )
-        print(f"[DELTA ETA] {event.json()}")
+        #print(f"[DELTA ETA] {event.json()}")
 
         await broker.publish(event, topic=ANALYTICS_TOPIC)
         await msg.ack()
@@ -374,7 +355,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
 
 # ====================================================
-# SUBSCRIBERS (UNO PER TOPIC) - MODIFICA SOSTANZIALE
+# SUBSCRIBERS
 # ====================================================
 
 @broker.subscriber(MAIN_TOPIC)
