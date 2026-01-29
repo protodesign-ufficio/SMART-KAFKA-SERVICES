@@ -192,22 +192,40 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
 
 def calculate_eta_timestamp(decoded: dict) -> Optional[float]:
     try:
-        def get_int(key, default=0):
+        def get_int_or_none(key: str) -> Optional[int]:
+            if key not in decoded:
+                return None
+            v = decoded.get(key)
             try:
-                return int(decoded.get(key, default))
+                return int(v)
             except Exception:
-                return default
+                return None
 
-        month = get_int("eta_month") or get_int("month")
-        day = get_int("eta_day") or get_int("day")
-        hour = get_int("eta_hour", 24)
-        minute = get_int("eta_minute", 60)
+        month = get_int_or_none("eta_month")
+        if month is None:
+            month = get_int_or_none("month")
 
-        if not (1 <= month <= 12 and 1 <= day <= 31):
+        day = get_int_or_none("eta_day")
+        if day is None:
+            day = get_int_or_none("day")
+
+        hour = get_int_or_none("eta_hour")
+        if hour is None:
+            hour = get_int_or_none("hour")
+
+        minute = get_int_or_none("eta_minute")
+        if minute is None:
+            minute = get_int_or_none("minute")
+
+        # Require explicit values; no silent fallbacks to default values.
+        if month is None or day is None or hour is None or minute is None:
             return None
 
-        hour = hour if hour < 24 else 0
-        minute = minute if minute < 60 else 0
+        # Validate ranges strictly
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
 
         now = datetime.datetime.now()
         year = now.year + (1 if now.month == 12 and month == 1 else 0)
