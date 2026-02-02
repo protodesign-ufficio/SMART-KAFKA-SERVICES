@@ -142,13 +142,13 @@ def normalize_nmea(raw_value) -> Optional[str]:
 # CORE AIS PROCESSOR
 # ====================================================
 
-async def process_ais_message(msg: KafkaMessage) -> None:
-    """Processa un `KafkaMessage`.
+async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
+    """Processa un messaggio AIS grezzo.
 
     DIFFERENZA CHIAVE: lo stato è indicizzato da (topic_sorgente, mmsi)
     così reale e simulato con stesso MMSI restano separati.
     """
-    raw = normalize_nmea(msg.body)
+    raw = normalize_nmea(raw_bytes)
     if not raw:
         return
 
@@ -163,9 +163,8 @@ async def process_ais_message(msg: KafkaMessage) -> None:
         return
 
     now = time.time()
-    source_topic = getattr(msg, "topic", MAIN_TOPIC)
 
-    key: ShipKey = (source_topic, mmsi)
+    key: ShipKey = (topic, mmsi)
 
     async with state_lock:
         ship = ships.setdefault(
@@ -174,7 +173,7 @@ async def process_ais_message(msg: KafkaMessage) -> None:
                 "ais": {},
                 "last_update_ts": now,
                 "components": {c: {"usage_total": 0.0, "active": False} for c in COMPONENTS},
-                "source": source_topic,  # ora è stabile, perché la key include il topic
+                "source": topic,  # ora è stabile, perché la key include il topic
                 "mmsi": mmsi,
             },
         )
@@ -188,13 +187,13 @@ async def process_ais_message(msg: KafkaMessage) -> None:
 
 @broker.subscriber(MAIN_TOPIC)
 async def consume_main(msg: KafkaMessage):
-    await process_ais_message(msg)
+    await process_ais_message(MAIN_TOPIC, msg.body)
     await msg.ack()
 
 
 @broker.subscriber(SIM_TOPIC)
 async def consume_sim(msg: KafkaMessage):
-    await process_ais_message(msg)
+    await process_ais_message(SIM_TOPIC, msg.body)
     await msg.ack()
 
 # ====================================================
