@@ -293,6 +293,4 @@ async def on_shutdown():
 # ====================================================
 
 if __name__ == "__main__":
-    import uvloop
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    app.run()
+    asyncio.run(app.run())
