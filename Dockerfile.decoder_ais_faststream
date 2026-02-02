@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir kafka-python pyais faststream[kafka] uvloop pydantic
+RUN pip install --no-cache-dir kafka-python pyais faststream[kafka,cli] uvloop pydantic
 
 COPY decoder_ais_faststream.py /app/decoder_ais_faststream.py
 
