@@ -186,7 +186,7 @@ def kafka_worker():
             time.sleep(2)
 
     for msg in consumer:
-        #print(msg)
+        log(f"[RECEIVED] {msg.value[:100] if msg.value else 'empty'}...")
         message_queue.put(msg)
 
 # ----------------------------------------------------

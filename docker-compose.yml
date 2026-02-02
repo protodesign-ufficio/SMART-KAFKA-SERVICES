@@ -92,6 +92,28 @@ services:
     networks:
       - kafka-net
 
+  # =======================
+  # DECODER AIS FASTSTREAM (UNIFIED)
+  # =======================
+  decoder-ais-faststream:
+    image: decoder-ais-faststream
+    build:
+      context: .
+      dockerfile: Dockerfile.decoder_ais_faststream
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+    restart: unless-stopped
+    networks:
+      - kafka-net
+
+  decoder-ais-faststream-docs:
+    image: decoder-ais-faststream
+    command: faststream docs serve decoder_ais_faststream:app --host 0.0.0.0 --port 8000
+    ports:
+      - "9003:8000"
+    networks:
+      - kafka-net
+
 networks:
   kafka-net:
     external: true
