@@ -212,13 +212,24 @@ def calculate_eta_timestamp(decoded: dict) -> Optional[float]:
 def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
     """
     ETA attesa "reale": ricavata da API con partenza schedulata + tempo_percorrenza.
+    Seleziona il percorso con virtuale=false.
     """
     try:
         r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
         if r.status_code != 200:
             return None
 
-        percorso = r.json().get("percorso")
+        percorsi = r.json().get("percorsi", [])
+        if not percorsi:
+            return None
+
+        # Cerca il percorso con virtuale=false (nave reale)
+        percorso = None
+        for p in percorsi:
+            if p.get("assegnazione", {}).get("virtuale") is False:
+                percorso = p.get("percorso")
+                break
+
         if not percorso:
             return None
 
@@ -236,13 +247,28 @@ def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
 def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
     """
     ETA attesa "simulazione": start_ts + tempo_percorrenza (API) in minuti.
+    Seleziona il percorso con virtuale=true.
     """
     try:
         r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
         if r.status_code != 200:
             return None
 
-        durata_min = r.json().get("percorso", {}).get("tempo_percorrenza")
+        percorsi = r.json().get("percorsi", [])
+        if not percorsi:
+            return None
+
+        # Cerca il percorso con virtuale=true (simulazione)
+        percorso = None
+        for p in percorsi:
+            if p.get("assegnazione", {}).get("virtuale") is True:
+                percorso = p.get("percorso")
+                break
+
+        if not percorso:
+            return None
+
+        durata_min = percorso.get("tempo_percorrenza")
         if durata_min is None:
             return None
 
