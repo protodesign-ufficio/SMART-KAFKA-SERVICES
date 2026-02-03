@@ -292,12 +292,40 @@ def cleanup_multipart_buffer() -> None:
     last_cleanup = now
 
 
+async def cleanup_inactive_ships() -> None:
+    """
+    Rimuove dalla memoria le navi che non hanno ricevuto dati per un tempo
+    pari a 1/3 del tempo di percorrenza del loro percorso attivo.
+    """
+    now = time.time()
+    async with state_lock:
+        for key in list(ships_db.keys()):
+            ship = ships_db[key]
+            last_seen = ship.get("last_seen")
+            tempo_percorrenza = ship.get("tempo_percorrenza")
+
+            if last_seen is None or tempo_percorrenza is None:
+                continue
+
+            # Timeout = 1/5 del tempo di percorrenza (in secondi)
+            timeout_sec = (tempo_percorrenza * 60) / 5
+
+            if now - last_seen > timeout_sec:
+                mmsi = ship.get("mmsi", "?")
+                print(f"[CLEANUP] Rimozione nave MMSI={mmsi} (inattiva per >{timeout_sec:.0f}s)")
+                del ships_db[key]
+                # Rimuovi anche dallo stato simulazione se presente
+                if key in simulation_state:
+                    del simulation_state[key]
+
+
 # ====================================================
 # CORE PROCESSOR
 # ====================================================
 
 async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simulation"]) -> None:
     cleanup_multipart_buffer()
+    await cleanup_inactive_ships()
 
     raw = normalize_nmea(msg.body)
     if not raw or not raw.startswith("!"):
@@ -349,9 +377,26 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         destination_norm = "UNKNOWN"
         expected_eta: Optional[float] = None
 
+        # Recupero tempo_percorrenza dall'API per il cleanup
+        tempo_percorrenza: Optional[float] = None
+        try:
+            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+            if r.status_code == 200:
+                percorsi = r.json().get("percorsi", [])
+                virtuale_target = (source == "simulation")
+                for p in percorsi:
+                    if p.get("assegnazione", {}).get("virtuale") is virtuale_target:
+                        tempo_percorrenza = p.get("percorso", {}).get("tempo_percorrenza")
+                        break
+        except Exception:
+            pass
+
         async with state_lock:
             ship = ships_db.setdefault(key, {"mmsi": mmsi, "topic": topic})
             ship.update(data)
+            ship["last_seen"] = time.time()
+            if tempo_percorrenza is not None:
+                ship["tempo_percorrenza"] = tempo_percorrenza
 
             destination = ship.get("destination") or "UNKNOWN"
             if isinstance(destination, str):
