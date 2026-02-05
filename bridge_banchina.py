@@ -152,6 +152,12 @@ class IncomingVessel(BaseModel):
     
     Questo modello viene usato come elemento della lista ``incoming``
     nell'evento ``BerthIncomingEvent``.
+
+    Attributes
+    ----------
+    * `mmsi` : str - Maritime Mobile Service Identity - identificativo univoco nave
+    * `eta` : float - Estimated Time of Arrival in formato Unix timestamp (secondi)
+    * `source` : str - Topic sorgente del dato AIS ("ais.raw" o "ais_simulation.raw")
     
     Examples
     --------
@@ -175,6 +181,17 @@ class BerthIncomingEvent(BaseModel):
     Questo evento viene pubblicato periodicamente sul topic ``analytics_ais.raw``
     e contiene l'elenco di tutte le navi attese entro la finestra temporale
     configurata per una specifica destinazione.
+
+    Attributes
+    ----------
+    * `type` : str - Tipo evento, sempre "berth_incoming"
+    * `destination` : str - Nome della banchina/porto di destinazione (normalizzato uppercase)
+    * `window_future_min` : int - Finestra temporale in minuti usata per il filtraggio
+    * `incoming_vessels` : int - Numero totale di navi in arrivo (reali + simulate)
+    * `incoming_vessels_real` : int - Numero di navi reali in arrivo (source=ais.raw)
+    * `incoming_vessels_sim` : int - Numero di navi simulate in arrivo (source=ais_simulation.raw)
+    * `incoming` : List[IncomingVessel] - Lista dettagliata delle navi in arrivo, ordinata per ETA crescente
+    * `timestamp` : float - Timestamp Unix della generazione dell'evento
     
     Examples
     --------
@@ -182,7 +199,7 @@ class BerthIncomingEvent(BaseModel):
     
         {
             "type": "berth_incoming",
-            "destination": "PORTO DI GENOVA",
+            "destination": "CETARA",
             "window_future_min": 180,
             "incoming_vessels": 3,
             "incoming_vessels_real": 2,

@@ -189,6 +189,17 @@ class DeltaEtaEvent(BaseModel):
     
     Rappresenta la differenza tra l'ETA dichiarata dalla nave (AIS)
     e l'ETA attesa basata sugli orari schedulati.
+
+    Attributes
+    ----------
+    * `type` : Literal["delta_eta"] - Tipo evento, sempre "delta_eta"
+    * `mmsi` : str - MMSI della nave
+    * `delta_min` : float - Scostamento in minuti (< 0 anticipo, = 0 puntuale, > 0 ritardo)
+    * `destination` : str - Destinazione AIS normalizzata (uppercase) o "UNKNOWN"
+    * `eta` : float - ETA dichiarata dalla nave (Unix timestamp)
+    * `eta_expected` : float - ETA attesa/schedulata (Unix timestamp)
+    * `source` : Literal["real", "simulation"] - Origine del messaggio ("real" o "simulation")
+    * `timestamp` : float - Timestamp Unix della generazione evento
     
     Examples
     --------
@@ -198,7 +209,7 @@ class DeltaEtaEvent(BaseModel):
             "type": "delta_eta",
             "mmsi": "123456789",
             "delta_min": -5.0,
-            "destination": "PORTO DI GENOVA",
+            "destination": "SALERNO",
             "eta": 1670000000.0,
             "eta_expected": 1670000300.0,
             "source": "real",
@@ -211,7 +222,7 @@ class DeltaEtaEvent(BaseModel):
             "type": "delta_eta",
             "mmsi": "987654321",
             "delta_min": 10.0,
-            "destination": "PORTO DI LIVORNO",
+            "destination": "POSITANO",
             "eta": 1670001200.0,
             "eta_expected": 1670000600.0,
             "source": "simulation",

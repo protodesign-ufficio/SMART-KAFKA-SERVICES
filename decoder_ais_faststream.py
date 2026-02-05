@@ -152,6 +152,11 @@ class AisDecodedPayload(BaseModel):
     
     Il contenuto varia in base al tipo di messaggio AIS (msg_type).
     I campi più comuni includono posizione, velocità, rotta e dati nave.
+
+    Attributes
+    ----------
+    * `msg_type` : int, optional - Tipo di messaggio AIS (1-27)
+    * `mmsi` : str, optional - Maritime Mobile Service Identity (9 cifre)
     
     Note
     ----
@@ -168,6 +173,15 @@ class AisDecodedEvent(BaseModel):
     
     Questo è il formato standard per tutti i messaggi decodificati
     pubblicati su ``ais_decoded.raw`` e ``ais_decoded_simulation.raw``.
+
+    Attributes
+    ----------
+    * `type` : str - Tipo evento, sempre "ais_decoded"
+    * `msg_type` : int, optional - Tipo messaggio AIS originale
+    * `mmsi` : str, optional - MMSI della nave
+    * `payload` : dict - Payload completo con tutti i campi AIS decodificati
+    * `timestamp` : float - Timestamp Unix (secondi) della decodifica
+    * `source` : str - Topic sorgente del messaggio originale
     
     Examples
     --------
