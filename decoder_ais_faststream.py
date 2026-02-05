@@ -135,7 +135,12 @@ SIM_OUTPUT_TOPIC = "ais_decoded_simulation.raw"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka per comunicazione pub/sub"""
 
-app = FastStream(broker)
+app = FastStream(
+    broker,
+    title="AIS Decoder Service",
+    description="Decoder AIS - Decodifica i messaggi NMEA grezzi e pubblica eventi standardizzati.",
+    version="2.0.0"
+)
 """FastStream: Applicazione principale FastStream"""
 
 # =============================================================================
@@ -153,17 +158,6 @@ class AisDecodedPayload(BaseModel):
     Il contenuto varia in base al tipo di messaggio AIS (msg_type).
     I campi più comuni includono posizione, velocità, rotta e dati nave.
     
-    Attributes
-    ----------
-    msg_type : int, optional
-        Tipo di messaggio AIS (1-27). I più comuni:
-        - 1,2,3: Report posizione (Classe A)
-        - 5: Dati statici e viaggio
-        - 18,19: Report posizione (Classe B)
-        - 24: Dati statici (Classe B)
-    mmsi : str, optional
-        Maritime Mobile Service Identity - identificativo univoco nave (9 cifre)
-    
     Note
     ----
     I campi aggiuntivi dipendono dal msg_type e vengono inclusi dinamicamente
@@ -179,21 +173,6 @@ class AisDecodedEvent(BaseModel):
     
     Questo è il formato standard per tutti i messaggi decodificati
     pubblicati su ``ais_decoded.raw`` e ``ais_decoded_simulation.raw``.
-    
-    Attributes
-    ----------
-    type : str
-        Tipo evento, sempre "ais_decoded"
-    msg_type : int, optional
-        Tipo messaggio AIS originale
-    mmsi : str, optional
-        MMSI della nave
-    payload : dict
-        Payload completo con tutti i campi AIS decodificati
-    timestamp : float
-        Timestamp Unix (secondi) della decodifica
-    source : str
-        Topic sorgente del messaggio originale
     
     Examples
     --------

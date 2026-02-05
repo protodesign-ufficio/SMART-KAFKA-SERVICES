@@ -128,7 +128,12 @@ COMPONENTS = ["engine_main", "generator", "gearbox"]
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+app = FastStream(
+    broker,
+    title="Bridge Components Service",
+    description="Worker Analytics Utilizzo Componenti - Monitora l'utilizzo dei componenti macchina delle navi basandosi sulla velocità rilevata.",
+    version="2.0.0"
+)
 """FastStream: Applicazione principale FastStream"""
 
 
@@ -173,23 +178,6 @@ class ComponentUsageEvent(BaseModel):
     
     Rappresenta lo stato corrente e il tempo di utilizzo cumulativo
     di un singolo componente macchina di una nave.
-    
-    Attributes
-    ----------
-    type : Literal["component_usage"]
-        Tipo evento, sempre "component_usage"
-    mmsi : str
-        MMSI della nave
-    component : str
-        Nome del componente (engine_main | generator | gearbox)
-    usage_seconds_total : int
-        Tempo totale di utilizzo in secondi (cumulativo)
-    active : bool
-        True se il componente è attualmente attivo (nave in movimento)
-    source : str
-        Topic sorgente (ais.raw | ais_simulation.raw)
-    timestamp : float
-        Timestamp Unix della generazione evento
     
     Examples
     --------

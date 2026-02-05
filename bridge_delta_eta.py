@@ -141,7 +141,12 @@ API_BASE = "http://87.26.178.190:15080"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+app = FastStream(
+    broker,
+    title="Bridge Delta ETA Service",
+    description="Worker Analytics Scostamento Orario - Calcola la differenza tra l'ETA osservata nei messaggi AIS e l'ETA attesa.",
+    version="2.0.0"
+)
 """FastStream: Applicazione principale FastStream"""
 
 
@@ -189,30 +194,6 @@ class DeltaEtaEvent(BaseModel):
     
     Rappresenta la differenza tra l'ETA dichiarata dalla nave (AIS)
     e l'ETA attesa basata sugli orari schedulati.
-    
-    Attributes
-    ----------
-    type : Literal["delta_eta"]
-        Tipo evento, sempre "delta_eta"
-    mmsi : str
-        MMSI della nave
-    delta_min : float
-        Scostamento in minuti. Interpretazione:
-        - < 0: nave in anticipo
-        - = 0: nave puntuale
-        - > 0: nave in ritardo
-    destination : str
-        Destinazione AIS normalizzata (uppercase) o "UNKNOWN"
-    eta : float
-        ETA dichiarata dalla nave (Unix timestamp)
-    eta_expected : float
-        ETA attesa/schedulata (Unix timestamp)
-    source : Literal["real", "simulation"]
-        Origine del messaggio:
-        - "real": da ricevitori AIS fisici
-        - "simulation": da simulatore
-    timestamp : float
-        Timestamp Unix della generazione evento
     
     Examples
     --------

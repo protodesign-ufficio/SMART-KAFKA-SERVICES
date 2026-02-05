@@ -137,7 +137,12 @@ SIM_TOPIC = "ais_simulation.raw"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+app = FastStream(
+    broker,
+    title="Bridge Banchina Service",
+    description="Worker Analytics Arrivi in Banchina - Analizza i messaggi AIS per tracciare le navi in arrivo alle banchine.",
+    version="2.0.0"
+)
 """FastStream: Applicazione principale FastStream"""
 
 # =============================================================================
@@ -152,17 +157,6 @@ class IncomingVessel(BaseModel):
     
     Questo modello viene usato come elemento della lista ``incoming``
     nell'evento ``BerthIncomingEvent``.
-    
-    Attributes
-    ----------
-    mmsi : str
-        Maritime Mobile Service Identity - identificativo univoco nave
-    eta : float
-        Estimated Time of Arrival in formato Unix timestamp (secondi)
-    source : str
-        Topic sorgente del dato AIS:
-        - "ais.raw": dati da ricevitori reali
-        - "ais_simulation.raw": dati da simulatore
     
     Examples
     --------
@@ -186,25 +180,6 @@ class BerthIncomingEvent(BaseModel):
     Questo evento viene pubblicato periodicamente sul topic ``analytics_ais.raw``
     e contiene l'elenco di tutte le navi attese entro la finestra temporale
     configurata per una specifica destinazione.
-    
-    Attributes
-    ----------
-    type : str
-        Tipo evento, sempre "berth_incoming"
-    destination : str
-        Nome della banchina/porto di destinazione (normalizzato uppercase)
-    window_future_min : int
-        Finestra temporale in minuti usata per il filtraggio
-    incoming_vessels : int
-        Numero totale di navi in arrivo (reali + simulate)
-    incoming_vessels_real : int
-        Numero di navi reali in arrivo (source=ais.raw)
-    incoming_vessels_sim : int
-        Numero di navi simulate in arrivo (source=ais_simulation.raw)
-    incoming : List[IncomingVessel]
-        Lista dettagliata delle navi in arrivo, ordinata per ETA crescente
-    timestamp : float
-        Timestamp Unix della generazione dell'evento
     
     Examples
     --------
