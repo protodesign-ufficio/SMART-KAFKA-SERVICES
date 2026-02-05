@@ -141,12 +141,7 @@ API_BASE = "http://87.26.178.190:15080"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(
-    broker,
-    title="Bridge Delta ETA Service",
-    description="Worker Analytics Scostamento Orario - Calcola la differenza tra l'ETA osservata nei messaggi AIS e l'ETA attesa.",
-    version="2.0.0"
-)
+app = FastStream(broker)
 """FastStream: Applicazione principale FastStream"""
 
 

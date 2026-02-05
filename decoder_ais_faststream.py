@@ -135,12 +135,7 @@ SIM_OUTPUT_TOPIC = "ais_decoded_simulation.raw"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka per comunicazione pub/sub"""
 
-app = FastStream(
-    broker,
-    title="AIS Decoder Service",
-    description="Decoder AIS - Decodifica i messaggi NMEA grezzi e pubblica eventi standardizzati.",
-    version="2.0.0"
-)
+app = FastStream(broker)
 """FastStream: Applicazione principale FastStream"""
 
 # =============================================================================

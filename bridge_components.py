@@ -128,12 +128,7 @@ COMPONENTS = ["engine_main", "generator", "gearbox"]
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(
-    broker,
-    title="Bridge Components Service",
-    description="Worker Analytics Utilizzo Componenti - Monitora l'utilizzo dei componenti macchina delle navi basandosi sulla velocità rilevata.",
-    version="2.0.0"
-)
+app = FastStream(broker)
 """FastStream: Applicazione principale FastStream"""
 
 

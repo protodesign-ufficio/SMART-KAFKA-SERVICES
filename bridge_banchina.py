@@ -137,12 +137,7 @@ SIM_TOPIC = "ais_simulation.raw"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(
-    broker,
-    title="Bridge Banchina Service",
-    description="Worker Analytics Arrivi in Banchina - Analizza i messaggi AIS per tracciare le navi in arrivo alle banchine.",
-    version="2.0.0"
-)
+app = FastStream(broker)
 """FastStream: Applicazione principale FastStream"""
 
 # =============================================================================
