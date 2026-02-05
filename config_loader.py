@@ -1,40 +1,109 @@
 """
-ESEMPIO DI INTEGRAZIONE: Come modificare i servizi Kafka per leggere dalla dashboard
+Config Loader - Gestione Configurazione Dinamica
+=================================================
 
-Questo file mostra come i servizi Kafka dovrebbero integrarsi con il backend
-per caricare la configurazione dalla dashboard "Impostazioni Avanzate".
+Descrizione
+-----------
+Questo modulo fornisce funzionalità per il caricamento e l'aggiornamento
+automatico della configurazione dei servizi Kafka dalla dashboard backend.
 
-🚀 CARATTERISTICA PRINCIPALE: AUTO-UPDATE IN TEMPO REALE
-I servizi hanno un thread che ogni 10 secondi controlla l'API del backend
-e aggiorna automaticamente i parametri se sono stati modificati.
+Caratteristiche Principali
+--------------------------
+1. **Caricamento Iniziale**: Recupera la configurazione dal backend all'avvio
+2. **Fallback Robusto**: Usa valori default o variabili d'ambiente se il backend non è raggiungibile
+3. **Auto-Update**: Thread opzionale per aggiornamento automatico ogni N secondi
+4. **Zero Downtime**: Non richiede riavvio dei container Docker per applicare modifiche
 
-NON È PIÙ NECESSARIO RIAVVIARE I CONTAINER DOCKER! ✅
+Architettura
+------------
+::
 
-La procedura rispetta il deployment indipendente su Docker mantenendo la flessibilità
-di fallback ai valori di default o variabili d'ambiente.
+    ┌─────────────────┐        ┌──────────────────┐        ┌─────────────────┐
+    │  Worker Kafka   │ ─────► │  config_loader   │ ─────► │  Dashboard API  │
+    │  (bridge_*.py)  │        │                  │        │  /api/config/   │
+    └─────────────────┘        │  - Fetch config  │        │  kafka-settings │
+                               │  - Fallback ENV  │        └─────────────────┘
+    ┌─────────────────┐        │  - Auto-update   │
+    │  Docker ENV     │ ─────► │                  │
+    │  WINDOW_FUTURE  │        └──────────────────┘
+    │  PUBLISH_INTERVAL│
+    └─────────────────┘
+
+Parametri Configurabili
+-----------------------
+- ``WINDOW_FUTURE``: Finestra temporale in secondi per analytics banchine
+- ``PUBLISH_INTERVAL``: Intervallo pubblicazione eventi in secondi  
+- ``PUBLISH_INTERVAL_SEC``: Alias di PUBLISH_INTERVAL per compatibilità
+- ``last_update``: Timestamp ultimo aggiornamento (per change detection)
+
+Priorità Configurazione
+-----------------------
+1. **Backend API** (priorità massima): Se raggiungibile, usa i valori dal backend
+2. **Variabili d'ambiente**: Se backend non raggiungibile, usa ENV variables
+3. **Valori default**: Se né backend né ENV disponibili, usa default hardcoded
+
+Autore: Team AIS Analytics
+Versione: 2.0.0
 """
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
 
 import os
 import requests
 import time
+import threading
 
-# =====================================================
-# CONFIGURAZIONE: LETTURA DA DASHBOARD + FALLBACK
-# =====================================================
+
+# =============================================================================
+# CONFIGURAZIONE MODULO
+# =============================================================================
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://87.26.178.190:15080")
-CONFIG_RETRY_INTERVAL = 5  # secondi
+"""str: URL base del backend per recupero configurazione"""
 
-def load_kafka_config_from_dashboard():
+CONFIG_RETRY_INTERVAL = 5
+"""int: Intervallo in secondi tra i retry in caso di errore"""
+
+
+# =============================================================================
+# FUNZIONI PRINCIPALI
+# =============================================================================
+
+def load_kafka_config_from_dashboard() -> dict:
     """
-    Legge la configurazione dal backend (dashboard).
-    Se fallisce, usa i valori di default o ENV variables.
+    Carica la configurazione Kafka dal backend (dashboard).
     
-    Returns:
-        dict: Configurazione con chiavi (window_future, publish_interval, etc.)
+    Interroga l'endpoint ``/api/config/kafka-settings`` per recuperare
+    i parametri di configurazione. In caso di fallimento, utilizza
+    valori di default o variabili d'ambiente.
+    
+    Returns
+    -------
+    dict
+        Dizionario con le chiavi:
+        - ``window_future``: int - Finestra temporale in secondi
+        - ``publish_interval``: int - Intervallo pubblicazione in secondi
+        - ``publish_interval_sec``: int - Alias di publish_interval
+        - ``last_update``: float - Timestamp ultimo aggiornamento
+    
+    Examples
+    --------
+    >>> config = load_kafka_config_from_dashboard()
+    >>> print(config["window_future"])
+    1800
+    >>> print(config["publish_interval"])
+    30
+    
+    Notes
+    -----
+    - Timeout HTTP: 5 secondi per evitare blocchi prolungati
+    - I parametri vengono loggati su stdout per debugging
+    - In caso di errore, il fallback è silenzioso (solo log)
     """
     try:
-        print(f"[CONFIG] Tentativo di caricamento da backend: {BACKEND_URL}/api/config/kafka-settings")
+        print(f"[CONFIG] Caricamento configurazione da: {BACKEND_URL}/api/config/kafka-settings")
         
         response = requests.get(
             f"{BACKEND_URL}/api/config/kafka-settings",
@@ -44,185 +113,176 @@ def load_kafka_config_from_dashboard():
         if response.status_code == 200:
             config = response.json()
             print(f"[CONFIG] ✓ Configurazione caricata dal backend:")
-            print(f"         - WINDOW_FUTURE: {config['window_future']} sec")
-            print(f"         - PUBLISH_INTERVAL: {config['publish_interval']} sec")
+            print(f"         - WINDOW_FUTURE:       {config['window_future']} sec")
+            print(f"         - PUBLISH_INTERVAL:    {config['publish_interval']} sec")
             print(f"         - PUBLISH_INTERVAL_SEC: {config['publish_interval_sec']} sec")
-            #print(f"         - API_BASE: {config['api_base']}")
-            #print(f"         - KAFKA_TOPIC: {config['kafka_topic']}")
-            print(f"         - Last Update: {config['last_update']}")
+            print(f"         - Last Update:         {config['last_update']}")
             return config
         else:
             raise Exception(f"HTTP {response.status_code}")
             
     except Exception as e:
         print(f"[CONFIG] ✗ Impossibile caricare dal backend: {e}")
-        print(f"[CONFIG] Fallback ai valori di default/ENV")
+        print(f"[CONFIG] Utilizzo fallback (ENV/default)")
         
-        # Fallback ai valori di default o variabili d'ambiente
+        # Fallback: variabili d'ambiente o valori default
         return {
             "window_future": int(os.getenv("WINDOW_FUTURE", "1800")),
             "publish_interval": int(os.getenv("PUBLISH_INTERVAL", "30")),
             "publish_interval_sec": int(os.getenv("PUBLISH_INTERVAL_SEC", "30")),
-            # "kafka_topic": os.getenv("KAFKA_TOPIC", "ais.raw"),
-            # "api_base": os.getenv("API_BASE", "http://87.26.178.190:15080"),
             "last_update": time.time()
         }
 
 
-def load_config_with_retry():
+def load_config_with_retry(max_retries: int = 3) -> dict:
     """
-    Tenta di caricare la configurazione con retry.
-    Utile se il backend non è ancora pronto al boot del servizio.
+    Carica la configurazione con retry automatico.
+    
+    Utile all'avvio dei servizi quando il backend potrebbe non essere
+    ancora pronto (es. durante il boot di un cluster Docker).
+    
+    Parameters
+    ----------
+    max_retries : int, optional
+        Numero massimo di tentativi (default: 3)
+    
+    Returns
+    -------
+    dict
+        Configurazione caricata (vedi load_kafka_config_from_dashboard)
+    
+    Notes
+    -----
+    Tra un tentativo e l'altro attende CONFIG_RETRY_INTERVAL secondi.
     """
-    max_retries = 3
     for attempt in range(max_retries):
         config = load_kafka_config_from_dashboard()
         if config:
             return config
         
         if attempt < max_retries - 1:
-            print(f"[CONFIG] Retry {attempt + 1}/{max_retries} in {CONFIG_RETRY_INTERVAL} secondi...")
+            print(f"[CONFIG] Retry {attempt + 1}/{max_retries} tra {CONFIG_RETRY_INTERVAL} secondi...")
             time.sleep(CONFIG_RETRY_INTERVAL)
     
     print("[CONFIG] Fallback completo ai valori di default")
     return load_kafka_config_from_dashboard()
 
 
-# =====================================================
-# ESEMPIO DI UTILIZZO IN bridge_banchina.py
-# =====================================================
+# =============================================================================
+# MONITORAGGIO PERIODICO
+# =============================================================================
 
-# Al boot del servizio
-#print("=" * 60)
-#print("BRIDGE BANCHINA - Startup")
-#print("=" * 60)
-
-# Carica la configurazione
-#config = load_config_with_retry()
-
-# Assegna i valori
-#WINDOW_FUTURE = config["window_future"]
-#PUBLISH_INTERVAL = config["publish_interval"]
-#API_BASE = config["api_base"]
-#CONFIG_LAST_UPDATE = config.get("last_update", time.time())
-
-#BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
-#MAIN_TOPIC = "ais.raw"
-#ANALYTICS_TOPIC = "analytics_ais.raw"
-
-#print(f"""
-#[BANCHINA] Configurazione finale:
-#  - BOOTSTRAP_SERVERS: {BOOTSTRAP_SERVERS}
-#  - WINDOW_FUTURE: {WINDOW_FUTURE} sec ({WINDOW_FUTURE/60:.1f} min)
-#  - PUBLISH_INTERVAL: {PUBLISH_INTERVAL} sec
-#  - API_BASE: {API_BASE}
-#  - MAIN_TOPIC: {MAIN_TOPIC}
-#  - ANALYTICS_TOPIC: {ANALYTICS_TOPIC}
-#""")
-
-# =====================================================
-# MONITORAGGIO PERIODICO (OPZIONALE)
-# =====================================================
-
-def periodic_config_check():
+def periodic_config_check() -> dict:
     """
-    Controlla la configurazione dal backend e aggiorna le variabili globali
-    se sono cambiate. Questo permette l'AUTO-UPDATE in tempo reale.
+    Controlla la configurazione e rileva cambiamenti.
+    
+    Questa funzione è progettata per essere chiamata periodicamente
+    (es. ogni 60-120 secondi) per rilevare aggiornamenti alla
+    configurazione senza richiedere il riavvio del servizio.
+    
+    Returns
+    -------
+    dict
+        Configurazione aggiornata
+    
+    Notes
+    -----
+    I worker devono salvare il valore precedente di ``last_update``
+    e confrontarlo con quello ritornato per decidere se applicare
+    le modifiche.
     """
-    global WINDOW_FUTURE, PUBLISH_INTERVAL, API_BASE, CONFIG_LAST_UPDATE
-    
-    new_config = load_kafka_config_from_dashboard()
-    
-    # Controlla il timestamp per rilevare cambiamenti (change detection)
-    if new_config.get("last_update", 0) > CONFIG_LAST_UPDATE:
-        print(f"\n[CONFIG] 🔄 Configurazione aggiornata dal backend!")
-        print(f"[CONFIG] Vecchia WINDOW_FUTURE={WINDOW_FUTURE}sec, PUBLISH_INTERVAL={PUBLISH_INTERVAL}sec")
-        print(f"[CONFIG] Nuova  WINDOW_FUTURE={new_config['window_future']}sec, PUBLISH_INTERVAL={new_config['publish_interval']}sec")
-        
-        WINDOW_FUTURE = new_config["window_future"]
-        PUBLISH_INTERVAL = new_config["publish_interval"]
-        API_BASE = new_config["api_base"]
-        CONFIG_LAST_UPDATE = new_config.get("last_update", time.time())
-        
-        print(f"[CONFIG] ✅ Configurazione ricaricata con successo!\n")
-    
-    return new_config
+    return load_kafka_config_from_dashboard()
 
 
-# =====================================================
-# THREAD DI AGGIORNAMENTO ASINCRONO (OPZIONALE)
-# =====================================================
+# =============================================================================
+# THREAD DI AGGIORNAMENTO (Opzionale)
+# =============================================================================
 
-import threading
-
-def config_update_thread():
+def _config_update_thread_target():
     """
-    Thread che controlla la configurazione ogni x secondi e aggiorna automaticamente
-    le variabili globali se sono cambiate.
+    Target function per il thread di aggiornamento configurazione.
     
-    Questo è il CORE del sistema di AUTO-UPDATE!
-    Non è necessario riavviare il servizio Docker quando modifichi i parametri.
+    Warning
+    -------
+    Non usare questo thread insieme ai watcher asyncio dei worker
+    FastStream per evitare conflitti.
     """
     while True:
-        time.sleep(120)  # Controlla ogni x secondi -> 2 minuti per ora
+        time.sleep(120)  # Check ogni 2 minuti
         try:
             periodic_config_check()
         except Exception as e:
             print(f"[CONFIG] Errore nel check periodico: {e}")
 
-# ✅ ATTIVATO DI DEFAULT - Il thread controlla e aggiorna automaticamente ogni x secondi
-#config_thread = threading.Thread(target=config_update_thread, daemon=True)
-#config_thread.start()
+
+def start_config_update_thread() -> threading.Thread:
+    """
+    Avvia il thread di aggiornamento configurazione.
+    
+    Returns
+    -------
+    threading.Thread
+        Thread avviato (daemon)
+    
+    Warning
+    -------
+    Usare solo se NON si usa il watcher asyncio nei worker FastStream.
+    """
+    thread = threading.Thread(target=_config_update_thread_target, daemon=True)
+    thread.start()
+    print("[CONFIG] Thread di auto-update avviato (check ogni 2 minuti)")
+    return thread
 
 
-
-# =====================================================
-# INTEGRAZIONE NEGLI SCRIPT KAFKA ESISTENTI
-# =====================================================
+# =============================================================================
+# GUIDA ALL'INTEGRAZIONE
+# =============================================================================
 
 """
-Per integrare questa logica negli script attuali (bridge_banchina.py, etc.):
+GUIDA ALL'INTEGRAZIONE NEI WORKER KAFKA
+========================================
 
-1. Inserisci il blocco di caricamento config all'inizio del file:
-   
-   config = load_config_with_retry()
-   WINDOW_FUTURE_MIN = config["window_future_min"]
-   PUBLISH_INTERVAL = config["publish_interval"]
-   API_BASE = config["api_base"]
+Per integrare questo modulo nei worker FastStream esistenti:
 
-2. Sostituisci le linee:
+1. IMPORT E CARICAMENTO INIZIALE
+   -----------------------------
+   All'inizio del file, dopo gli import::
    
-   # PRIMA:
-   WINDOW_FUTURE_MIN = 30
-   PUBLISH_INTERVAL = 30
-   API_BASE = "http://87.26.178.190:15080"
-   
-   # DOPO:
-   config = load_kafka_config_from_dashboard()
-   WINDOW_FUTURE_MIN = config["window_future_min"]
-   PUBLISH_INTERVAL = config["publish_interval"]
-   API_BASE = config["api_base"]
+       from config_loader import load_kafka_config_from_dashboard
+       
+       config = load_kafka_config_from_dashboard()
+       WINDOW_FUTURE_MIN = int(config["window_future"])
+       PUBLISH_INTERVAL = int(config["publish_interval"])
+       CONFIG_LAST_UPDATE = float(config.get("last_update", time.time()))
 
-3. Se vuoi il hot-reload, avvia il thread (opzionale):
+2. WATCHER ASINCRONO (Raccomandato per FastStream)
+   ------------------------------------------------
+   Creare un task asyncio che controlla periodicamente::
    
-   config_thread = threading.Thread(target=config_update_thread, daemon=True)
-   config_thread.start()
+       async def config_watcher():
+           global WINDOW_FUTURE_MIN, PUBLISH_INTERVAL, CONFIG_LAST_UPDATE
+           
+           while True:
+               await asyncio.sleep(120)  # Check ogni 2 minuti
+               
+               new_config = load_kafka_config_from_dashboard()
+               last = float(new_config.get("last_update", 0))
+               
+               if last > CONFIG_LAST_UPDATE:
+                   print("[CONFIG] Configurazione aggiornata!")
+                   WINDOW_FUTURE_MIN = int(new_config["window_future"])
+                   PUBLISH_INTERVAL = int(new_config["publish_interval"])
+                   CONFIG_LAST_UPDATE = last
+       
+       # Avviare in @app.on_startup
+       asyncio.create_task(config_watcher())
 
+3. CONFIGURAZIONE DOCKER (opzionale)
+   ----------------------------------
+   Se il backend non è raggiungibile, i fallback usano ENV::
+   
+       environment:
+         - BACKEND_URL=http://backend:15080
+         - WINDOW_FUTURE=1800
+         - PUBLISH_INTERVAL=30
 """
-
-# =====================================================
-# TEST ENDPOINT
-# =====================================================
-
-#if __name__ == "__main__":
-#    print("\n" + "=" * 60)
-#    print("TEST: Caricamento configurazione")
-#    print("=" * 60 + "\n")
-    
-#    config = load_kafka_config_from_dashboard()
-    
-#    print("\nConfigurazione caricata:")
-#    for key, value in config.items():
-#        print(f"  {key}: {value}")
-    
-#    print("\n✓ Test completato")
