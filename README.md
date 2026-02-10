@@ -1,71 +1,140 @@
-AisConsumer - Documentazione FastStream
-=====================================
+# AisConsumer - Sistema di Analytics AIS
 
-Questo repository contiene i worker FastStream che consumano messaggi AIS grezzi
-(`ais.raw`, `ais_simulation.raw`) e pubblicano eventi di analytics su
-`analytics_ais.raw`.
+## Panoramica
 
-Scopo
------
-- Rendere la documentazione generata (AsyncAPI) più leggibile e presentabile.
-- Fornire esempi di payload per i modelli Pydantic usati nella generazione AsyncAPI.
+AisConsumer è un sistema di microservizi basato su **FastStream** e **Apache Kafka** per l'elaborazione in tempo reale di messaggi AIS (Automatic Identification System) navali. Il sistema consuma messaggi AIS grezzi in formato NMEA, li decodifica e produce eventi analytics per il monitoraggio delle navi.
 
-Topici Kafka principali
------------------------
-- `ais.raw` - flusso AIS reale
-- `ais_simulation.raw` - flusso AIS simulato
-- `analytics_ais.raw` - topic di output dove vengono pubblicati gli eventi tipizzati
+## Architettura Generale
 
-Worker principali
------------------
-- `bridge_banchina.py` - pubblica eventi `berth_incoming` contenenti navi in arrivo per banchina
-- `bridge_components.py` - pubblica eventi `component_usage` con l'utilizzo dei componenti nave
-- `bridge_delta_eta.py` - pubblica eventi `delta_eta` che confrontano ETA AIS vs ETA attesa
-
-Come leggere la documentazione AsyncAPI
---------------------------------------
-I file `bridge_*.py` contengono Pydantic models (classi) usate da FastStream per
-generare lo schema AsyncAPI. Le funzioni annotate con `@broker.publisher(topic)`
-sono dei *stub* che permettono a FastStream di inferire i payload tipizzati.
-
-Esempi di payload
-------------------
-`DeltaEtaEvent` (bridge_delta_eta.py):
 ```
-{
-  "type": "delta_eta",
-  "mmsi": "123456789",
-  "delta_min": -12.5,
-  "destination": "PORTO X",
-  "eta": 1670000000.0,
-  "eta_expected": 1670000720.0,
-  "source": "real",
-  "timestamp": 1670000100.0
-}
+┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────────┐
+│     ais.raw         │     │  Decoder AIS        │     │   ais_decoded.raw       │
+│  (NMEA grezzo)      │────►│  FastStream         │────►│   (JSON decodificato)   │
+└─────────────────────┘     └─────────────────────┘     └─────────────────────────┘
+         │                                                        
+         │                                                        
+         ▼                                                        
+┌─────────────────────┐     ┌─────────────────────────┐
+│  Bridge Services    │────►│   analytics_ais.raw     │
+│  - Banchina         │     │                         │
+│  - Components       │     │  Eventi:                │
+│  - Delta ETA        │     │  - berth_incoming       │
+└─────────────────────┘     │  - component_usage      │
+                            │  - delta_eta            │
+                            └─────────────────────────┘
 ```
 
-`BerthIncomingEvent` (bridge_banchina.py):
-```
-{
-  "type": "berth_incoming",
-  "destination": "PORTO X",
-  "window_future_min": 180,
-  "incoming_vessels": 2,
-  "incoming": [{"mmsi":"123","eta":1670000000.0,"source":"ais.raw"}],
-  "timestamp": 1670000100.0
-}
+## Servizi Disponibili
+
+| Servizio | File | Descrizione | Porta Docs |
+|----------|------|-------------|------------|
+| **Decoder AIS** | `decoder_ais_faststream.py` | Decodifica messaggi NMEA in JSON | - |
+| **Bridge Banchina** | `bridge_banchina.py` | Analytics navi in arrivo per banchina | 9001 |
+| **Bridge Components** | `bridge_components.py` | Monitoraggio utilizzo componenti nave | 9002 |
+| **Bridge Delta ETA** | `bridge_delta_eta.py` | Calcolo scostamento ETA | 9000 |
+| **Config Loader** | `config_loader.py` | Gestione configurazione dinamica | - |
+
+## Topic Kafka
+
+### Input
+- `ais.raw` - Messaggi AIS reali in formato NMEA
+- `ais_simulation.raw` - Messaggi AIS simulati in formato NMEA
+
+### Output
+- `ais_decoded.raw` - Messaggi AIS reali decodificati in JSON
+- `ais_decoded_simulation.raw` - Messaggi AIS simulati decodificati in JSON
+- `analytics_ais.raw` - Eventi analytics aggregati
+
+## Tecnologie Utilizzate
+
+- **FastStream** - Framework per streaming Kafka
+- **PyAIS** - Libreria per decodifica messaggi AIS
+- **Pydantic** - Validazione e serializzazione dati
+- **Apache Kafka** - Message broker
+- **Docker** - Containerizzazione
+
+## Quick Start
+
+### Requisiti
+- Python 3.8+
+- Docker e Docker Compose
+- Apache Kafka cluster
+
+### Installazione Dipendenze
+```bash
+pip install -r requirements.txt
 ```
 
-`ComponentUsageEvent` (bridge_components.py):
-```
-{
-  "type": "component_usage",
-  "mmsi": "123456789",
-  "component": "engine_main",
-  "usage_seconds_total": 120,
-  "active": true,
-  "source": "ais.raw",
-  "timestamp": 1670000100.0
-}
+### Avvio con Docker Compose
+```bash
+docker-compose up -d
 ```
 
+### Avvio Standalone
+```bash
+# Decoder AIS
+python decoder_ais_faststream.py
+
+# Bridge Banchina
+python bridge_banchina.py
+
+# Bridge Components
+python bridge_components.py
+
+# Bridge Delta ETA
+python bridge_delta_eta.py
+```
+
+## Variabili d'Ambiente
+
+| Variabile | Default | Descrizione |
+|-----------|---------|-------------|
+| `BOOTSTRAP_SERVERS` | `localhost:29092` | Indirizzo cluster Kafka |
+| `BACKEND_URL` | `http://87.26.178.190:15080` | URL backend per configurazione |
+| `WINDOW_FUTURE` | Da dashboard | Finestra temporale analytics |
+| `PUBLISH_INTERVAL` | Da dashboard | Intervallo pubblicazione eventi |
+
+## Documentazione AsyncAPI
+
+Il sistema supporta la generazione automatica di documentazione AsyncAPI tramite FastStream:
+
+```bash
+# Genera documentazione per un servizio
+faststream docs serve bridge_banchina:app --host 0.0.0.0 --port 8000
+```
+
+I servizi docs sono disponibili alle seguenti porte quando avviati con Docker Compose:
+- **Bridge Delta ETA Docs**: http://localhost:9000
+- **Bridge Banchina Docs**: http://localhost:9001
+- **Bridge Components Docs**: http://localhost:9002
+
+## Struttura del Progetto
+
+```
+AisConsumer/
+├── bridge_banchina.py       # Analytics navi in arrivo
+├── bridge_components.py     # Monitoraggio componenti
+├── bridge_delta_eta.py      # Calcolo delta ETA
+├── config_loader.py         # Gestione configurazione
+├── decoder_ais_faststream.py # Decoder AIS
+├── docker-compose.yml       # Orchestrazione container
+├── Dockerfile.*             # Definizioni container
+├── requirements.txt         # Dipendenze Python
+├── README.md                # Documentazione principale
+├── docs/                    # Documentazione dettagliata
+│   ├── README.md
+│   ├── decoder_ais_faststream.md
+│   ├── bridge_banchina.md
+│   ├── bridge_components.md
+│   ├── bridge_delta_eta.md
+│   └── config_loader.md
+└── old-ignore/             # File deprecati
+```
+
+## Versione
+
+Versione: 2.0.0
+
+## Autore
+
+Team AIS Analytics
