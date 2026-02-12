@@ -70,8 +70,9 @@ Dove:
 
 ### Navi Simulate (source="simulation")
 - L'ETA attesa viene calcolata al primo messaggio ricevuto
-- Formula: `timestamp_primo_messaggio + tempo_percorrenza`
+- Formula: `timestamp_primo_messaggio + (tempo_percorrenza / sim_speed_factor)`
 - Il percorso deve avere `virtuale=true`
+- Il `tempo_percorrenza` viene scalato per `SIM_SPEED_FACTOR` per tenere conto della velocità accelerata della simulazione
 
 ## Modelli Pydantic
 
@@ -117,6 +118,12 @@ http://87.26.178.190:15080
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
 | `BOOTSTRAP_SERVERS` | `localhost:9092` | Indirizzo cluster Kafka |
+
+### Parametri da Backend (config_loader)
+
+| Parametro | Default | Descrizione |
+|-----------|---------|-------------|
+| `SIM_SPEED_FACTOR` | `1.0` | Fattore di velocità simulazione. Il `tempo_percorrenza` per le navi simulate viene diviso per questo valore |
 
 ### Costanti
 

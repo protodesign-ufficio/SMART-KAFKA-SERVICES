@@ -116,6 +116,7 @@ def load_kafka_config_from_dashboard() -> dict:
             print(f"         - WINDOW_FUTURE:       {config['window_future']} sec")
             print(f"         - PUBLISH_INTERVAL:    {config['publish_interval']} sec")
             print(f"         - PUBLISH_INTERVAL_SEC: {config['publish_interval_sec']} sec")
+            print(f"         - SIM_SPEED_FACTOR:    {config.get('sim_speed_factor', 1.0)}")
             print(f"         - Last Update:         {config['last_update']}")
             return config
         else:
@@ -130,6 +131,7 @@ def load_kafka_config_from_dashboard() -> dict:
             "window_future": int(os.getenv("WINDOW_FUTURE", "1800")),
             "publish_interval": int(os.getenv("PUBLISH_INTERVAL", "30")),
             "publish_interval_sec": int(os.getenv("PUBLISH_INTERVAL_SEC", "30")),
+            "sim_speed_factor": float(os.getenv("SIM_SPEED_FACTOR", "1.0")),
             "last_update": time.time()
         }
 

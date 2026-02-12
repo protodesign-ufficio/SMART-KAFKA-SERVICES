@@ -69,8 +69,10 @@ Il sistema distingue tra navi reali e simulate:
 
 **Navi Simulate (source="simulation"):**
     - L'ETA attesa viene calcolata al primo messaggio ricevuto
-    - Formula: ``timestamp_primo_messaggio + tempo_percorrenza``
+    - Formula: ``timestamp_primo_messaggio + (tempo_percorrenza / sim_speed_factor)``
     - Il percorso deve avere ``virtuale=true``
+    - Il ``tempo_percorrenza`` viene scalato per ``SIM_SPEED_FACTOR`` (configurabile
+      da backend) per tenere conto della velocità accelerata della simulazione
 
 Cleanup Automatico
 ------------------
@@ -113,10 +115,18 @@ import logging
 # Riduce la verbosità dei log FastStream
 logging.getLogger("faststream").setLevel(logging.WARNING)
 
+# Import configurazione dinamica
+from config_loader import load_kafka_config_from_dashboard
+
 
 # =============================================================================
 # CONFIGURAZIONE
 # =============================================================================
+
+# Carica configurazione dal backend
+_config = load_kafka_config_from_dashboard()
+SIM_SPEED_FACTOR = float(_config.get("sim_speed_factor", 1.0))
+"""float: Fattore di velocità simulazione (il tempo_percorrenza viene diviso per questo valore)"""
 
 BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
 """str: Indirizzo cluster Kafka"""
@@ -480,8 +490,11 @@ def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
     """
     Calcola l'ETA attesa per una nave simulata.
     
-    Formula: ``start_ts + tempo_percorrenza`` dove start_ts è il timestamp
-    del primo messaggio ricevuto dalla simulazione.
+    Formula: ``start_ts + (tempo_percorrenza / sim_speed_factor)`` dove start_ts 
+    è il timestamp del primo messaggio ricevuto dalla simulazione.
+    
+    Il tempo_percorrenza viene scalato per SIM_SPEED_FACTOR per tenere conto
+    della velocità accelerata della simulazione.
     
     Seleziona il percorso con ``virtuale=true`` (simulazione).
     
@@ -520,7 +533,9 @@ def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
         if durata_min is None:
             return None
 
-        return start_ts + float(durata_min) * 60
+        # Scala il tempo_percorrenza per il fattore di velocità simulazione
+        durata_min_scalata = float(durata_min) / SIM_SPEED_FACTOR
+        return start_ts + durata_min_scalata * 60
     except Exception:
         return None
 
@@ -783,6 +798,7 @@ async def startup():
     print(f"Topic Input:     {MAIN_TOPIC}, {SIM_TOPIC}")
     print(f"Topic Output:    {ANALYTICS_TOPIC}")
     print(f"API Backend:     {API_BASE}")
+    print(f"Sim Speed Factor: {SIM_SPEED_FACTOR}")
     print("=" * 60)
     print("Worker avviato (real + simulation)")
     print("=" * 60)

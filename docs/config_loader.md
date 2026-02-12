@@ -23,6 +23,7 @@ Il **Config Loader** è un modulo di utilità che fornisce funzionalità per il 
 │  Docker ENV     │ ─────► │                  │
 │  WINDOW_FUTURE  │        └──────────────────┘
 │  PUBLISH_INTERVAL│
+│  SIM_SPEED_FACTOR│
 └─────────────────┘
 ```
 
@@ -33,6 +34,7 @@ Il **Config Loader** è un modulo di utilità che fornisce funzionalità per il 
 | `WINDOW_FUTURE` | int | Finestra temporale in secondi per analytics banchine |
 | `PUBLISH_INTERVAL` | int | Intervallo pubblicazione eventi in secondi |
 | `PUBLISH_INTERVAL_SEC` | int | Alias di PUBLISH_INTERVAL per compatibilità |
+| `SIM_SPEED_FACTOR` | float | Fattore di velocità simulazione per bridge_delta_eta (default: 1.0) |
 | `last_update` | float | Timestamp ultimo aggiornamento (per change detection) |
 
 ## Priorità Configurazione
@@ -66,6 +68,7 @@ last_update = config["last_update"]
     "window_future": 1800,        # 30 minuti in secondi
     "publish_interval": 30,       # ogni 30 secondi
     "publish_interval_sec": 30,   # alias
+    "sim_speed_factor": 1.0,      # fattore velocità simulazione
     "last_update": 1670000100.0   # timestamp Unix
 }
 ```
@@ -89,7 +92,8 @@ http://87.26.178.190:15080
 ```json
 {
   "window_future": 1800,
-  "publish_interval": 30
+  "publish_interval": 30,
+  "sim_speed_factor": 1.0
 }
 ```
 

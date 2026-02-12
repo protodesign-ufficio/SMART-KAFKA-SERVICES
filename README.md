@@ -93,6 +93,7 @@ python bridge_delta_eta.py
 | `BACKEND_URL` | `http://87.26.178.190:15080` | URL backend per configurazione |
 | `WINDOW_FUTURE` | Da dashboard | Finestra temporale analytics |
 | `PUBLISH_INTERVAL` | Da dashboard | Intervallo pubblicazione eventi |
+| `SIM_SPEED_FACTOR` | (1.0) | Fattore velocità simulazione per delta ETA |
 
 ## Documentazione AsyncAPI
 
