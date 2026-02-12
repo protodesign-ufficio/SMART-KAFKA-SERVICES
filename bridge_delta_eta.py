@@ -128,6 +128,11 @@ _config = load_kafka_config_from_dashboard()
 SIM_SPEED_FACTOR = float(_config.get("sim_speed_factor", 1.0))
 """float: Fattore di velocità simulazione (il tempo_percorrenza viene diviso per questo valore)"""
 
+CONFIG_LAST_UPDATE: float = float(_config.get("last_update", time.time()))
+"""float: Timestamp ultimo aggiornamento configurazione"""
+
+print(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR caricato all'avvio: {SIM_SPEED_FACTOR}")
+
 BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
 """str: Indirizzo cluster Kafka"""
 
@@ -783,6 +788,42 @@ async def ais_consumer_sim(msg: KafkaMessage):
 
 
 # =============================================================================
+# CONFIG WATCHER - Ricaricamento Configurazione
+# =============================================================================
+
+async def config_watcher():
+    """
+    Task asincrono per ricaricamento automatico della configurazione.
+    
+    Ogni 2 minuti controlla il backend per aggiornamenti alla configurazione.
+    Se il timestamp last_update è più recente, ricarica i parametri.
+    
+    Parametri aggiornati:
+    - SIM_SPEED_FACTOR: fattore velocità simulazione
+    
+    Notes
+    -----
+    Questo permette di modificare la configurazione dalla dashboard
+    senza riavviare il container Docker.
+    """
+    global SIM_SPEED_FACTOR, CONFIG_LAST_UPDATE
+
+    while True:
+        await asyncio.sleep(120)  # Check ogni 2 minuti
+
+        new_config = load_kafka_config_from_dashboard()
+        last_update = float(new_config.get("last_update", 0))
+
+        if last_update > CONFIG_LAST_UPDATE:
+            new_sim_speed = float(new_config.get("sim_speed_factor", 1.0))
+            print(f"[DELTA ETA CONFIG] Ricaricamento configurazione...")
+            print(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {SIM_SPEED_FACTOR} -> {new_sim_speed}")
+
+            SIM_SPEED_FACTOR = new_sim_speed
+            CONFIG_LAST_UPDATE = last_update
+
+
+# =============================================================================
 # LIFECYCLE HOOKS
 # =============================================================================
 
@@ -790,6 +831,9 @@ async def ais_consumer_sim(msg: KafkaMessage):
 async def startup():
     """
     Hook eseguito all'avvio dell'applicazione FastStream.
+    
+    Inizializza i task asincroni per:
+    - Watcher configurazione (ricarica SIM_SPEED_FACTOR ogni 2 minuti)
     """
     print("=" * 60)
     print("BRIDGE DELTA ETA - Analytics Worker")
@@ -802,3 +846,5 @@ async def startup():
     print("=" * 60)
     print("Worker avviato (real + simulation)")
     print("=" * 60)
+
+    asyncio.create_task(config_watcher())
