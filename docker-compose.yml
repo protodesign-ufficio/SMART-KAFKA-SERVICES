@@ -93,6 +93,30 @@ services:
   #     - kafka-net
 
   # =======================
+  # ARRIVO (GEOFENCING)
+  # =======================
+  bridge-arrivo:
+    image: bridge-arrivo
+    build:
+      context: .
+      dockerfile: Dockerfile.arrivo
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GEOFENCE_RADIUS_M: "500"
+      ARRIVAL_CONFIRM_COUNT: "3"
+    restart: unless-stopped
+    networks:
+      - kafka-net
+
+  bridge-arrivo-docs:
+    image: bridge-arrivo
+    command: faststream docs serve bridge_arrivo:app --host 0.0.0.0 --port 8000
+    ports:
+      - "9004:8000"
+    networks:
+      - kafka-net
+
+  # =======================
   # DECODER AIS FASTSTREAM (UNIFIED)
   # =======================
   decoder-ais-faststream:
