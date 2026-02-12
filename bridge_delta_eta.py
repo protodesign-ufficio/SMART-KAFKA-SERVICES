@@ -123,9 +123,28 @@ from config_loader import load_kafka_config_from_dashboard
 # CONFIGURAZIONE
 # =============================================================================
 
+def _parse_sim_speed_factor(value) -> float:
+    """
+    Converte in modo sicuro il valore sim_speed_factor.
+    
+    Gestisce None, 0, valori negativi e stringhe non valide,
+    restituendo sempre un valore valido (>= 1.0 come fallback).
+    """
+    try:
+        f = float(value) if value is not None else 1.0
+        if f <= 0:
+            print(f"[DELTA ETA CONFIG] ATTENZIONE: sim_speed_factor={f} non valido (<= 0), uso default 1.0")
+            return 1.0
+        return f
+    except (TypeError, ValueError) as e:
+        print(f"[DELTA ETA CONFIG] ATTENZIONE: sim_speed_factor='{value}' non parsabile ({e}), uso default 1.0")
+        return 1.0
+
+
 # Carica configurazione dal backend
 _config = load_kafka_config_from_dashboard()
-SIM_SPEED_FACTOR = float(_config.get("sim_speed_factor", 1.0))
+print(f"[DELTA ETA CONFIG] Configurazione raw ricevuta: sim_speed_factor={_config.get('sim_speed_factor', '<ASSENTE>')}")
+SIM_SPEED_FACTOR = _parse_sim_speed_factor(_config.get("sim_speed_factor", 1.0))
 """float: Fattore di velocità simulazione (il tempo_percorrenza viene diviso per questo valore)"""
 
 CONFIG_LAST_UPDATE: float = float(_config.get("last_update", time.time()))
@@ -540,8 +559,12 @@ def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
 
         # Scala il tempo_percorrenza per il fattore di velocità simulazione
         durata_min_scalata = float(durata_min) / SIM_SPEED_FACTOR
-        return start_ts + durata_min_scalata * 60
-    except Exception:
+        expected = start_ts + durata_min_scalata * 60
+        print(f"[DELTA ETA SIM] MMSI={mmsi} durata_min={durata_min} SIM_SPEED_FACTOR={SIM_SPEED_FACTOR} "
+              f"durata_scalata={durata_min_scalata:.2f}min expected_eta={expected}")
+        return expected
+    except Exception as e:
+        print(f"[DELTA ETA SIM ERROR] Errore calcolo ETA simulata MMSI={mmsi}: {e}")
         return None
 
 
@@ -815,8 +838,9 @@ async def config_watcher():
         last_update = float(new_config.get("last_update", 0))
 
         if last_update > CONFIG_LAST_UPDATE:
-            new_sim_speed = float(new_config.get("sim_speed_factor", 1.0))
+            new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
             print(f"[DELTA ETA CONFIG] Ricaricamento configurazione...")
+            print(f"[DELTA ETA CONFIG] sim_speed_factor raw dal backend: {new_config.get('sim_speed_factor', '<ASSENTE>')}")
             print(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {SIM_SPEED_FACTOR} -> {new_sim_speed}")
 
             SIM_SPEED_FACTOR = new_sim_speed
