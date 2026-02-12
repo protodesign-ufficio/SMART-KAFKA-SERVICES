@@ -102,8 +102,8 @@ services:
       dockerfile: Dockerfile.arrivo
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
-      GEOFENCE_RADIUS_M: "500"
-      ARRIVAL_CONFIRM_COUNT: "3"
+      GEOFENCE_RADIUS_M: "100"
+      ARRIVAL_CONFIRM_COUNT: "1"
     restart: unless-stopped
     networks:
       - kafka-net
