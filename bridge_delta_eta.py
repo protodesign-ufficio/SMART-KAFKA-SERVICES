@@ -247,6 +247,7 @@ class DeltaEtaEvent(BaseModel):
             "eta": 1670000000.0,
             "eta_expected": 1670000300.0,
             "source": "real",
+            "sim_speed_factor": null,
             "timestamp": 1670000100.0
         }
     
@@ -260,6 +261,7 @@ class DeltaEtaEvent(BaseModel):
             "eta": 1670001200.0,
             "eta_expected": 1670000600.0,
             "source": "simulation",
+            "sim_speed_factor": 2.0,
             "timestamp": 1670000500.0
         }
     """
@@ -270,6 +272,7 @@ class DeltaEtaEvent(BaseModel):
     eta: float = Field(..., description="ETA AIS (Unix timestamp)")
     eta_expected: float = Field(..., description="ETA attesa (Unix timestamp)")
     source: Literal["real", "simulation"] = Field(..., description="Origine: 'real' | 'simulation'")
+    sim_speed_factor: Optional[float] = Field(None, description="Fattore velocità simulazione usato (None per navi reali)")
     timestamp: float = Field(..., description="Timestamp evento (Unix seconds)")
 
 
@@ -591,7 +594,7 @@ async def cleanup_inactive_ships() -> None:
     Rimuove dalla memoria le navi inattive.
     
     Una nave viene rimossa quando non riceve dati per un tempo pari
-    a 1/5 del tempo di percorrenza del suo percorso attivo.
+    a 1/10 del tempo di percorrenza del suo percorso attivo.
     
     Questo evita accumulo di memoria per navi che hanno completato
     la navigazione o sono uscite dall'area di copertura.
@@ -606,8 +609,8 @@ async def cleanup_inactive_ships() -> None:
             if last_seen is None or tempo_percorrenza is None:
                 continue
 
-            # Timeout = 1/5 del tempo di percorrenza (in secondi)
-            timeout_sec = (tempo_percorrenza * 60) / 5
+            # Timeout = 1/10 del tempo di percorrenza (in secondi)
+            timeout_sec = (tempo_percorrenza * 60) / 10
 
             if now - last_seen > timeout_sec:
                 mmsi = ship.get("mmsi", "?")
@@ -763,6 +766,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             eta=eta,
             eta_expected=expected_eta,
             source=source,
+            sim_speed_factor=SIM_SPEED_FACTOR if source == "simulation" else None,
             timestamp=time.time(),
         )
 
@@ -814,6 +818,69 @@ async def ais_consumer_sim(msg: KafkaMessage):
 # CONFIG WATCHER - Ricaricamento Configurazione
 # =============================================================================
 
+async def refresh_active_simulations_expected_eta() -> None:
+    """
+    Ricalcola l'ETA attesa per tutte le simulazioni attive.
+
+    Viene invocata quando cambia SIM_SPEED_FACTOR per applicare
+    subito il nuovo fattore anche alle simulazioni già in corso.
+    Evita inconsistenze tra sim_speed_factor pubblicato e delta_min calcolato.
+    """
+    async with state_lock:
+        snapshot = [
+            (key, sim.get("start_ts"), sim.get("expected_eta"))
+            for key, sim in simulation_state.items()
+        ]
+
+    if not snapshot:
+        return
+
+    updated = 0
+    skipped = 0
+
+    for key, start_ts, old_expected_eta in snapshot:
+        if start_ts is None:
+            skipped += 1
+            continue
+
+        _, mmsi = key
+        new_expected_eta = get_simulation_expected_eta(mmsi, float(start_ts))
+        if new_expected_eta is None:
+            skipped += 1
+            continue
+
+        async with state_lock:
+            sim = simulation_state.get(key)
+            if sim is None:
+                continue
+
+            sim["expected_eta"] = new_expected_eta
+
+        updated += 1
+        print(
+            f"[DELTA ETA CONFIG] Recompute simulation MMSI={mmsi} "
+            f"expected_eta: {old_expected_eta} -> {new_expected_eta}"
+        )
+
+    print(
+        f"[DELTA ETA CONFIG] Recompute simulazioni attive completato: "
+        f"aggiornate={updated}, saltate={skipped}"
+    )
+
+
+async def periodic_cleanup_task():
+    """
+    Task periodico per pulizia navi inattive.
+    
+    Esegue cleanup ogni 5 minuti anche quando non arrivano messaggi,
+    evitando accumulo di memoria in caso di idle prolungato del sistema.
+    """
+    while True:
+        await asyncio.sleep(300)  # Check ogni 5 minuti
+        await cleanup_inactive_ships()
+        print("[CLEANUP] Pulizia periodica completata")
+
+
 async def config_watcher():
     """
     Task asincrono per ricaricamento automatico della configurazione.
@@ -838,6 +905,7 @@ async def config_watcher():
         last_update = float(new_config.get("last_update", 0))
 
         if last_update > CONFIG_LAST_UPDATE:
+            old_sim_speed = SIM_SPEED_FACTOR
             new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
             print(f"[DELTA ETA CONFIG] Ricaricamento configurazione...")
             print(f"[DELTA ETA CONFIG] sim_speed_factor raw dal backend: {new_config.get('sim_speed_factor', '<ASSENTE>')}")
@@ -845,6 +913,10 @@ async def config_watcher():
 
             SIM_SPEED_FACTOR = new_sim_speed
             CONFIG_LAST_UPDATE = last_update
+
+            # Applica il nuovo fattore anche alle simulazioni già in corso
+            if new_sim_speed != old_sim_speed:
+                await refresh_active_simulations_expected_eta()
 
 
 # =============================================================================
@@ -858,6 +930,7 @@ async def startup():
     
     Inizializza i task asincroni per:
     - Watcher configurazione (ricarica SIM_SPEED_FACTOR ogni 2 minuti)
+    - Cleanup periodico navi inattive (ogni 5 minuti)
     """
     print("=" * 60)
     print("BRIDGE DELTA ETA - Analytics Worker")
@@ -872,3 +945,4 @@ async def startup():
     print("=" * 60)
 
     asyncio.create_task(config_watcher())
+    asyncio.create_task(periodic_cleanup_task())
