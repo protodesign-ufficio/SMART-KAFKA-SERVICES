@@ -93,7 +93,7 @@ from functools import reduce
 from typing import Optional, Dict, Any
 
 from faststream import FastStream
-from faststream.kafka import KafkaBroker
+from faststream.kafka import KafkaBroker, KafkaMessage
 from pyais import decode as ais_decode
 from pydantic import BaseModel, Field
 import logging
@@ -579,7 +579,7 @@ async def decode_and_publish(raw_value, source_topic: str, output_topic: str) ->
 # e il retry in caso di errori.
 
 @broker.subscriber(MAIN_INPUT_TOPIC)
-async def handle_main_ais(msg):
+async def handle_main_ais(msg: KafkaMessage):
     """
     Subscriber per il topic AIS principale (dati reali).
     
@@ -588,18 +588,23 @@ async def handle_main_ais(msg):
     
     Parameters
     ----------
-    msg : bytes
-        Messaggio AIS grezzo in formato NMEA
+    msg : KafkaMessage
+        Messaggio Kafka contenente payload AIS grezzo in formato NMEA
     
     Notes
     -----
     I messaggi decodificati vengono pubblicati su ``ais_decoded.raw``.
     """
-    await decode_and_publish(msg, MAIN_INPUT_TOPIC, MAIN_OUTPUT_TOPIC)
+    try:
+        await decode_and_publish(msg.body, MAIN_INPUT_TOPIC, MAIN_OUTPUT_TOPIC)
+        await msg.ack()
+    except Exception as e:
+        log(f"[SUBSCRIBER ERROR] MAIN topic: {e}")
+        await msg.nack()
 
 
 @broker.subscriber(SIM_INPUT_TOPIC)
-async def handle_sim_ais(msg):
+async def handle_sim_ais(msg: KafkaMessage):
     """
     Subscriber per il topic AIS simulazione.
     
@@ -608,15 +613,20 @@ async def handle_sim_ais(msg):
     
     Parameters
     ----------
-    msg : bytes
-        Messaggio AIS simulato in formato NMEA
+    msg : KafkaMessage
+        Messaggio Kafka contenente payload AIS simulato in formato NMEA
     
     Notes
     -----
     I messaggi decodificati vengono pubblicati su ``ais_decoded_simulation.raw``.
     Questo permette di mantenere separati i flussi reali e simulati.
     """
-    await decode_and_publish(msg, SIM_INPUT_TOPIC, SIM_OUTPUT_TOPIC)
+    try:
+        await decode_and_publish(msg.body, SIM_INPUT_TOPIC, SIM_OUTPUT_TOPIC)
+        await msg.ack()
+    except Exception as e:
+        log(f"[SUBSCRIBER ERROR] SIM topic: {e}")
+        await msg.nack()
 
 
 # =============================================================================
