@@ -108,7 +108,7 @@ per un numero configurabile di messaggi consecutivi:
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
 | `BOOTSTRAP_SERVERS` | `87.26.178.190:29092` | Indirizzo cluster Kafka |
-| `API_BASE` | `http://87.26.178.190:15080` | URL base API backend |
+| `API_BASE` | `http://87.26.178.190:25080` | URL base API backend |
 | `GEOFENCE_RADIUS_M` | `500` | Raggio geofence destinazione (metri) |
 | `ARRIVAL_CONFIRM_COUNT` | `3` | Messaggi consecutivi per conferma arrivo |
 | `ROUTE_CACHE_TTL_SEC` | `600` | Tempo cache coordinate rotta (secondi) |

@@ -60,7 +60,7 @@ import threading
 # CONFIGURAZIONE MODULO
 # =============================================================================
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://87.26.178.190:15080")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://87.26.178.190:25080")
 """str: URL base del backend per recupero configurazione"""
 
 CONFIG_RETRY_INTERVAL = 5
@@ -284,7 +284,7 @@ Per integrare questo modulo nei worker FastStream esistenti:
    Se il backend non è raggiungibile, i fallback usano ENV::
    
        environment:
-         - BACKEND_URL=http://backend:15080
+         - BACKEND_URL=http://backend:25080
          - WINDOW_FUTURE=1800
          - PUBLISH_INTERVAL=30
 """

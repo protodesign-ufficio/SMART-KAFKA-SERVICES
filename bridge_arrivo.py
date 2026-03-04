@@ -133,7 +133,7 @@ MAIN_TOPIC = "ais.raw"
 SIM_TOPIC = "ais_simulation.raw"
 """str: Topic input per messaggi AIS simulati"""
 
-API_BASE = os.getenv("API_BASE", "http://87.26.178.190:15080")
+API_BASE = os.getenv("API_BASE", "http://87.26.178.190:25080")
 """str: URL base dell'API backend"""
 
 # --- Parametri Geofencing ---

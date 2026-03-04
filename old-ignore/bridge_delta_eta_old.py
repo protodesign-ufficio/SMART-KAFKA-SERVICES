@@ -23,7 +23,7 @@ ALL_TOPICS = [MAIN_TOPIC, SIM_TOPIC]
 
 ANALYTICS_TOPIC = "analytics_ais.raw"
 
-API_BASE = "http://87.26.178.190:15080"
+API_BASE = "http://87.26.178.190:25080"
 
 message_queue = queue.Queue(maxsize=10000)
 ships_db = {}

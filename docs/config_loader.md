@@ -84,7 +84,7 @@ GET /api/config/kafka-settings
 ### URL Base
 
 ```
-http://87.26.178.190:15080
+http://87.26.178.190:25080
 ```
 
 ### Risposta Attesa
@@ -109,7 +109,7 @@ In caso di errore nella comunicazione con il backend:
 
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
-| `BACKEND_URL` | `http://87.26.178.190:15080` | URL base del backend |
+| `BACKEND_URL` | `http://87.26.178.190:25080` | URL base del backend |
 | `CONFIG_RETRY_INTERVAL` | `5` | Intervallo retry in secondi |
 
 ## Auto-Update in Background

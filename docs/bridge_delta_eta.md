@@ -108,7 +108,7 @@ Il worker interroga il backend per recuperare informazioni aggiuntive:
 
 ### URL Base API
 ```
-http://87.26.178.190:15080
+http://87.26.178.190:25080
 ```
 
 ## Configurazione
@@ -129,7 +129,7 @@ http://87.26.178.190:15080
 
 | Costante | Valore | Descrizione |
 |----------|--------|-------------|
-| `API_BASE` | `http://87.26.178.190:15080` | URL base backend |
+| `API_BASE` | `http://87.26.178.190:25080` | URL base backend |
 
 ## Avvio
 

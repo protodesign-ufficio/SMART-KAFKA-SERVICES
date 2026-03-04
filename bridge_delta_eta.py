@@ -164,7 +164,7 @@ SIM_TOPIC = "ais_simulation.raw"
 ANALYTICS_TOPIC = "analytics_ais.raw"
 """str: Topic output per eventi analytics"""
 
-API_BASE = "http://87.26.178.190:15080"
+API_BASE = "http://87.26.178.190:25080"
 """str: URL base dell'API backend per recupero dati percorso"""
 
 
