@@ -2,7 +2,7 @@
 
 ## Descrizione
 
-Il **Bridge Components** è un worker FastStream che monitora l'utilizzo dei componenti macchina delle navi (motore principale, generatore, cambio) basandosi sulla velocità rilevata dai messaggi AIS.
+Il **Bridge Components** è un worker FastStream che monitora l'utilizzo dei componenti macchina delle navi basandosi sulla velocità rilevata dai messaggi AIS.
 
 ## Funzionalità Principale
 
@@ -37,13 +37,12 @@ Traccia il tempo di utilizzo dei componenti per ogni nave. Un componente è cons
 
 ## Componenti Monitorati
 
-Il sistema traccia tre componenti principali per ogni nave:
+Il sistema traccia i componenti restituiti dinamicamente dal backend per ogni MMSI tramite:
 
-| Componente | Descrizione |
-|------------|-------------|
-| `engine_main` | Motore principale - attivo quando la nave è in movimento |
-| `generator` | Generatore - attivo quando la nave è in movimento |
-| `gearbox` | Cambio - attivo quando la nave è in movimento |
+`GET /componente/by_mmsi/{mmsi}`
+
+Il nome componente usato negli eventi `component_usage` viene letto dal campo `nome_componente`.
+Ogni componente ricevuto dall'API viene monitorato con la stessa logica di attivazione basata su SOG.
 
 ## Logica di Attivazione
 

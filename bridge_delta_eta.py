@@ -480,11 +480,11 @@ def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
     
     Notes
     -----
-    Il timeout della richiesta HTTP è di 3 secondi per evitare
+    Il timeout della richiesta HTTP è di 30 secondi per evitare
     blocchi prolungati in caso di backend lento.
     """
     try:
-        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
         if r.status_code != 200:
             return None
 
@@ -538,7 +538,7 @@ def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
         ETA attesa in Unix timestamp o None se non disponibile
     """
     try:
-        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
         if r.status_code != 200:
             return None
 

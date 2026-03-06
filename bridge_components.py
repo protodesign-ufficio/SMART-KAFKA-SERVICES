@@ -5,8 +5,8 @@ Bridge Components - Worker Analytics Utilizzo Componenti
 Descrizione
 -----------
 Questo modulo implementa un worker FastStream che monitora l'utilizzo dei
-componenti macchina delle navi (motore principale, generatore, cambio)
-basandosi sulla velocità rilevata dai messaggi AIS.
+componenti macchina delle navi basandosi sulla velocità rilevata dai
+messaggi AIS.
 
 Funzionalità Principale
 -----------------------
@@ -39,11 +39,8 @@ Topic Kafka
 
 Componenti Monitorati
 ---------------------
-Il sistema traccia tre componenti principali per ogni nave:
-
-- ``engine_main``: Motore principale - attivo quando la nave è in movimento
-- ``generator``: Generatore - attivo quando la nave è in movimento
-- ``gearbox``: Cambio - attivo quando la nave è in movimento
+Il sistema traccia i componenti restituiti dinamicamente dal backend per ogni
+MMSI tramite l'endpoint ``/componente/by_mmsi/{mmsi}``.
 
 Logica di Attivazione
 ---------------------
@@ -79,8 +76,9 @@ import asyncio
 import json
 import os
 import time
-from typing import Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
+import requests
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
 from pydantic import BaseModel, Field
@@ -117,8 +115,14 @@ SIM_TOPIC = "ais_simulation.raw"
 OUTPUT_TOPIC = "analytics_ais.raw"
 """str: Topic output per eventi analytics"""
 
-COMPONENTS = ["engine_main", "generator", "gearbox"]
-"""list[str]: Lista dei componenti monitorati per ogni nave"""
+API_BASE = os.getenv("API_BASE", "http://87.26.178.190:25080")
+"""str: URL base dell'API backend"""
+
+COMPONENT_API_TIMEOUT_SEC = float(os.getenv("COMPONENT_API_TIMEOUT_SEC", "3"))
+"""float: Timeout HTTP per il recupero componenti dal backend"""
+
+EMPTY_COMPONENTS_RETRY_SEC = float(os.getenv("EMPTY_COMPONENTS_RETRY_SEC", "60"))
+"""float: Intervallo di retry per MMSI con lista componenti vuota"""
 
 
 # =============================================================================
@@ -153,13 +157,22 @@ Struttura valore:
 {
     "ais": dict,              # Ultimi dati AIS decodificati
     "last_update_ts": float,  # Timestamp ultimo aggiornamento
-    "components": {           # Stato componenti
-        "engine_main": {"usage_total": float, "active": bool},
-        "generator": {"usage_total": float, "active": bool},
-        "gearbox": {"usage_total": float, "active": bool}
+    "components": {           # Stato componenti dinamici
+        "nome_componente": {"usage_total": float, "active": bool}
     },
     "source": str,            # Topic sorgente
     "mmsi": str               # MMSI nave
+}
+"""
+
+component_cache: Dict[str, dict] = {}
+"""
+Dict[str, dict]: Cache componenti per MMSI.
+
+Struttura valore:
+{
+    "components": list[str],   # Componenti recuperati da backend
+    "fetched_at": float        # Timestamp ultimo fetch
 }
 """
 
@@ -178,7 +191,7 @@ class ComponentUsageEvent(BaseModel):
     ----------
     * `type` : Literal["component_usage"] - Tipo evento, sempre "component_usage"
     * `mmsi` : str - MMSI della nave
-    * `component` : str - Nome del componente (engine_main | generator | gearbox)
+    * `component` : str - Nome del componente (dinamico dal backend)
     * `usage_seconds_total` : int - Tempo totale di utilizzo in secondi (cumulativo)
     * `active` : bool - True se il componente è attualmente attivo (nave in movimento)
     * `source` : str - Topic sorgente (ais.raw | ais_simulation.raw)
@@ -205,7 +218,7 @@ class ComponentUsageEvent(BaseModel):
     """
     type: Literal["component_usage"] = Field("component_usage", description="Tipo evento")
     mmsi: str = Field(..., description="MMSI nave (9 cifre)")
-    component: str = Field(..., description="Nome componente: engine_main | generator | gearbox")
+    component: str = Field(..., description="Nome componente (dinamico dal backend)")
     usage_seconds_total: int = Field(..., description="Secondi totali di utilizzo (cumulativo)")
     active: bool = Field(..., description="Componente attualmente attivo")
     source: str = Field(..., description="Topic sorgente: ais.raw | ais_simulation.raw")
@@ -225,6 +238,116 @@ async def _doc_component_usage() -> ComponentUsageEvent:
 # =============================================================================
 # LOGICA DI DOMINIO
 # =============================================================================
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    """Rimuove duplicati preservando l'ordine originale."""
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def extract_component_names(payload: Any) -> list[str]:
+    """
+    Estrae in modo robusto i nomi componenti dalla risposta API.
+
+    Supporta payload in forma lista o dizionario.
+    La chiave primaria attesa e' ``nome_componente``.
+    """
+    if payload is None:
+        return []
+
+    component_name_keys = (
+        "nome_componente",
+        "nome",
+        "name",
+        "codice",
+        "code",
+        "component",
+        "componente",
+    )
+    container_keys = ("components", "componenti", "data", "items", "rows")
+
+    def parse_node(node: Any) -> list[str]:
+        if isinstance(node, str):
+            name = node.strip()
+            return [name] if name else []
+
+        if isinstance(node, list):
+            out: list[str] = []
+            for item in node:
+                out.extend(parse_node(item))
+            return out
+
+        if isinstance(node, dict):
+            out: list[str] = []
+
+            for key in component_name_keys:
+                value = node.get(key)
+                if isinstance(value, str) and value.strip():
+                    out.append(value.strip())
+
+            for key in container_keys:
+                if key in node:
+                    out.extend(parse_node(node.get(key)))
+
+            return out
+
+        return []
+
+    return _dedupe_preserve_order(parse_node(payload))
+
+
+def fetch_components_for_mmsi(mmsi: str) -> list[str]:
+    """Recupera i componenti della nave dall'API backend."""
+    try:
+        url = f"{API_BASE}/componente/by_mmsi/{mmsi}"
+        response = requests.get(url, timeout=COMPONENT_API_TIMEOUT_SEC)
+        if response.status_code != 200:
+            print(f"[COMPONENTS API] HTTP {response.status_code} su MMSI={mmsi}")
+            return []
+
+        return extract_component_names(response.json())
+    except Exception as exc:
+        print(f"[COMPONENTS API] Errore recupero componenti MMSI={mmsi}: {exc}")
+        return []
+
+
+async def get_components_for_mmsi(mmsi: str) -> list[str]:
+    """
+    Restituisce i componenti per MMSI usando cache in-memory.
+
+    Se la cache è assente fa fetch immediato.
+    Se la cache esiste ma è vuota, ritenta dopo EMPTY_COMPONENTS_RETRY_SEC.
+    """
+    now = time.time()
+    async with state_lock:
+        cached = component_cache.get(mmsi)
+
+        if cached and cached.get("components"):
+            return list(cached["components"])
+
+        should_retry_empty = bool(
+            cached
+            and not cached.get("components")
+            and (now - float(cached.get("fetched_at", 0.0)) >= EMPTY_COMPONENTS_RETRY_SEC)
+        )
+
+        if cached and not should_retry_empty:
+            return []
+
+    components = await asyncio.to_thread(fetch_components_for_mmsi, mmsi)
+
+    async with state_lock:
+        component_cache[mmsi] = {
+            "components": list(components),
+            "fetched_at": time.time(),
+        }
+
+    return components
 
 def is_component_active(component: str, ais_state: dict) -> bool:
     """
@@ -374,6 +497,10 @@ async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
     if not mmsi:
         return
 
+    components = await get_components_for_mmsi(mmsi)
+    if not components:
+        return
+
     now = time.time()
 
     # Chiave composta: (topic, mmsi) per separare real/simulation
@@ -386,7 +513,7 @@ async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
             {
                 "ais": {},
                 "last_update_ts": now,
-                "components": {c: {"usage_total": 0.0, "active": False} for c in COMPONENTS},
+                "components": {c: {"usage_total": 0.0, "active": False} for c in components},
                 "source": topic,
                 "mmsi": mmsi,
             },
@@ -444,7 +571,7 @@ async def publish_loop():
     Notes
     -----
     Viene pubblicato un evento separato per ogni combinazione (nave, componente).
-    Per N navi e 3 componenti, vengono pubblicati N*3 eventi per ciclo.
+    Per N navi e C componenti medi, vengono pubblicati N*C eventi per ciclo.
     """
     while True:
         await asyncio.sleep(PUBLISH_INTERVAL_SEC)
@@ -528,7 +655,8 @@ async def startup():
     print(f"Kafka Bootstrap:   {BOOTSTRAP_SERVERS}")
     print(f"Topic Input:       {MAIN_TOPIC}, {SIM_TOPIC}")
     print(f"Topic Output:      {OUTPUT_TOPIC}")
-    print(f"Componenti:        {', '.join(COMPONENTS)}")
+    print(f"API Backend:       {API_BASE}")
+    print("Componenti:        dinamici da /componente/by_mmsi/{mmsi}")
     print(f"Publish Interval:  {PUBLISH_INTERVAL_SEC} secondi")
     print("=" * 60)
 
