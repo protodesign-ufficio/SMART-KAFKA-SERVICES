@@ -462,7 +462,7 @@ def get_route_info(mmsi: str, is_simulation: bool) -> Optional[Tuple[float, floa
     """
     try:
         # Step 1: Recupera percorso attivo
-        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
         if r.status_code != 200:
             return None
 
@@ -537,7 +537,7 @@ def mark_assegnazione_completata(assegnazione_id: str, mmsi: str) -> bool:
         url = f"{API_BASE}/assegnazione/{assegnazione_id}/stato"
         payload = {"stato_esecuzione": "COMPLETATA"}
 
-        r = requests.patch(url, json=payload, timeout=5)
+        r = requests.patch(url, json=payload, timeout=30)
 
         if r.status_code in (200, 201, 204):
             log(f"[API] ✓ Assegnazione {assegnazione_id} marcata COMPLETATA "
