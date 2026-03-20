@@ -86,7 +86,8 @@ def load_kafka_config_from_dashboard() -> dict:
         - ``window_future``: int - Finestra temporale in secondi
         - ``publish_interval``: int - Intervallo pubblicazione in secondi
         - ``publish_interval_sec``: int - Alias di publish_interval
-        - ``last_update``: float - Timestamp ultimo aggiornamento
+           - ``sim_speed_factor``: float - Fattore velocità simulazione
+           - ``last_update``: float - Timestamp ultimo aggiornamento (SEMPRE presente)
     
     Examples
     --------
@@ -101,6 +102,7 @@ def load_kafka_config_from_dashboard() -> dict:
     - Timeout HTTP: 5 secondi per evitare blocchi prolungati
     - I parametri vengono loggati su stdout per debugging
     - In caso di errore, il fallback è silenzioso (solo log)
+       - Il campo ``last_update`` è SEMPRE presente anche se il backend non lo ritorna
     """
     try:
         print(f"[CONFIG] Caricamento configurazione da: {BACKEND_URL}/api/config/kafka-settings")
@@ -112,6 +114,14 @@ def load_kafka_config_from_dashboard() -> dict:
         
         if response.status_code == 200:
             config = response.json()
+
+            # Garantisce sempre la presenza del timestamp di update.
+            if "last_update" not in config or config["last_update"] is None:
+                config["last_update"] = time.time()
+                print(
+                    f"[CONFIG] Backend non ha ritornato 'last_update', impostato a: {config['last_update']}"
+                )
+
             print(f"[CONFIG] ✓ Configurazione caricata dal backend:")
             print(f"         - WINDOW_FUTURE:       {config['window_future']} sec")
             print(f"         - PUBLISH_INTERVAL:    {config['publish_interval']} sec")

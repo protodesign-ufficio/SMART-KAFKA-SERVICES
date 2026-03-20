@@ -904,18 +904,25 @@ async def config_watcher():
         new_config = load_kafka_config_from_dashboard()
         last_update = float(new_config.get("last_update", 0))
 
+        # DEBUG: Log del controllo
+        print(f"[CONFIG_WATCHER DEBUG] last_update dal backend: {last_update}")
+        print(f"[CONFIG_WATCHER DEBUG] CONFIG_LAST_UPDATE memory: {CONFIG_LAST_UPDATE}")
+        print(f"[CONFIG_WATCHER DEBUG] Confronto: {last_update} > {CONFIG_LAST_UPDATE} ? {last_update > CONFIG_LAST_UPDATE}")
+        print(f"[CONFIG_WATCHER DEBUG] Raw config keys: {list(new_config.keys())}")
+
         if last_update > CONFIG_LAST_UPDATE:
             old_sim_speed = SIM_SPEED_FACTOR
             new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
-            print(f"[DELTA ETA CONFIG] Ricaricamento configurazione...")
-            print(f"[DELTA ETA CONFIG] sim_speed_factor raw dal backend: {new_config.get('sim_speed_factor', '<ASSENTE>')}")
-            print(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {SIM_SPEED_FACTOR} -> {new_sim_speed}")
+
+            print(f"[CONFIG_WATCHER] Configurazione aggiornata dal backend (timestamp: {last_update})")
+            print(f"[CONFIG_WATCHER] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
 
             SIM_SPEED_FACTOR = new_sim_speed
             CONFIG_LAST_UPDATE = last_update
 
             # Applica il nuovo fattore anche alle simulazioni già in corso
             if new_sim_speed != old_sim_speed:
+                print(f"[CONFIG_WATCHER] Fattore cambiato, aggiornamento ETA simulazioni attive...")
                 await refresh_active_simulations_expected_eta()
 
 
