@@ -107,7 +107,7 @@ def load_kafka_config_from_dashboard() -> dict:
         
         response = requests.get(
             f"{BACKEND_URL}/api/config/kafka-settings",
-            timeout=5
+            timeout=30
         )
         
         if response.status_code == 200:

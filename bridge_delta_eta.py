@@ -708,7 +708,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         # Recupero tempo_percorrenza dall'API per il cleanup
         tempo_percorrenza: Optional[float] = None
         try:
-            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=3)
+            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
             if r.status_code == 200:
                 percorsi = r.json().get("percorsi", [])
                 virtuale_target = (source == "simulation")
