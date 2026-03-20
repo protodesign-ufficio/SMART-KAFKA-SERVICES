@@ -748,7 +748,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
                 # Per navi reali: recupera da API
                 expected_eta = await get_expected_eta_from_api(mmsi)
             else:
-                # Per simulazioni: calcola al primo messaggio e memorizza
+                # Per simulazioni: calcola SEMPRE ad ogni messaggio
                 sim = simulation_state.get(key)
                 if not sim:
                     start_ts = time.time()
@@ -758,7 +758,9 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
                         return
                     simulation_state[key] = {"start_ts": start_ts, "expected_eta": expected_eta}
                 else:
-                    expected_eta = sim["expected_eta"]
+                    start_ts = sim["start_ts"]
+                    expected_eta = await get_simulation_expected_eta(mmsi, start_ts)
+                    sim["expected_eta"] = expected_eta
 
         if expected_eta is None:
             await msg.ack()
