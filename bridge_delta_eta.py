@@ -459,7 +459,21 @@ def calculate_eta_timestamp(decoded: dict) -> Optional[float]:
         return None
 
 
-def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
+async def _fetch_active_percorsi(mmsi: str) -> Optional[list]:
+    """Recupera in modo non bloccante i percorsi attivi del vascello."""
+    try:
+        def _request() -> Optional[list]:
+            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
+            if r.status_code != 200:
+                return None
+            return r.json().get("percorsi", [])
+
+        return await asyncio.to_thread(_request)
+    except Exception:
+        return None
+
+
+async def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
     """
     Recupera l'ETA attesa per una nave reale dall'API backend.
     
@@ -484,11 +498,7 @@ def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
     blocchi prolungati in caso di backend lento.
     """
     try:
-        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
-        if r.status_code != 200:
-            return None
-
-        percorsi = r.json().get("percorsi", [])
+        percorsi = await _fetch_active_percorsi(mmsi)
         if not percorsi:
             return None
 
@@ -513,7 +523,7 @@ def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
         return None
 
 
-def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
+async def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
     """
     Calcola l'ETA attesa per una nave simulata.
     
@@ -538,11 +548,7 @@ def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[float]:
         ETA attesa in Unix timestamp o None se non disponibile
     """
     try:
-        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
-        if r.status_code != 200:
-            return None
-
-        percorsi = r.json().get("percorsi", [])
+        percorsi = await _fetch_active_percorsi(mmsi)
         if not percorsi:
             return None
 
@@ -705,12 +711,11 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         destination_norm = "UNKNOWN"
         expected_eta: Optional[float] = None
 
-        # Recupero tempo_percorrenza dall'API per il cleanup
+        # Recupero tempo_percorrenza dall'API per il cleanup (non bloccante)
         tempo_percorrenza: Optional[float] = None
         try:
-            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
-            if r.status_code == 200:
-                percorsi = r.json().get("percorsi", [])
+            percorsi = await _fetch_active_percorsi(mmsi)
+            if percorsi:
                 virtuale_target = (source == "simulation")
                 for p in percorsi:
                     if p.get("assegnazione", {}).get("virtuale") is virtuale_target:
@@ -737,13 +742,13 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             # Calcola ETA attesa in base alla sorgente
             if source == "real":
                 # Per navi reali: recupera da API
-                expected_eta = get_expected_eta_from_api(mmsi)
+                expected_eta = await get_expected_eta_from_api(mmsi)
             else:
                 # Per simulazioni: calcola al primo messaggio e memorizza
                 sim = simulation_state.get(key)
                 if not sim:
                     start_ts = time.time()
-                    expected_eta = get_simulation_expected_eta(mmsi, start_ts)
+                    expected_eta = await get_simulation_expected_eta(mmsi, start_ts)
                     if expected_eta is None:
                         await msg.ack()
                         return
@@ -844,7 +849,7 @@ async def refresh_active_simulations_expected_eta() -> None:
             continue
 
         _, mmsi = key
-        new_expected_eta = get_simulation_expected_eta(mmsi, float(start_ts))
+        new_expected_eta = await get_simulation_expected_eta(mmsi, float(start_ts))
         if new_expected_eta is None:
             skipped += 1
             continue
@@ -901,7 +906,8 @@ async def config_watcher():
     while True:
         await asyncio.sleep(120)  # Check ogni 2 minuti
 
-        new_config = load_kafka_config_from_dashboard()
+        print("[DELTA ETA CONFIG] Watcher tick (120s)")
+        new_config = await asyncio.to_thread(load_kafka_config_from_dashboard)
         last_update = float(new_config.get("last_update", 0))
 
         if last_update > CONFIG_LAST_UPDATE:
