@@ -164,6 +164,9 @@ SIM_TOPIC = "ais_simulation.raw"
 ANALYTICS_TOPIC = "analytics_ais.raw"
 """str: Topic output per eventi analytics"""
 
+CONFIG_WATCHER_INTERVAL_SEC = int(os.getenv("CONFIG_WATCHER_INTERVAL_SEC", "120"))
+"""int: Intervallo watcher configurazione in secondi"""
+
 API_BASE = "http://87.26.178.190:25080"
 """str: URL base dell'API backend per recupero dati percorso"""
 
@@ -899,31 +902,61 @@ async def config_watcher():
     global SIM_SPEED_FACTOR, CONFIG_LAST_UPDATE
 
     while True:
-        await asyncio.sleep(120)  # Check ogni 2 minuti
+        await asyncio.sleep(CONFIG_WATCHER_INTERVAL_SEC)
 
-        new_config = load_kafka_config_from_dashboard()
-        last_update = float(new_config.get("last_update", 0))
+        try:
+            check_ts = time.time()
+            new_config = load_kafka_config_from_dashboard()
 
-        # DEBUG: Log del controllo
-        print(f"[CONFIG_WATCHER DEBUG] last_update dal backend: {last_update}")
-        print(f"[CONFIG_WATCHER DEBUG] CONFIG_LAST_UPDATE memory: {CONFIG_LAST_UPDATE}")
-        print(f"[CONFIG_WATCHER DEBUG] Confronto: {last_update} > {CONFIG_LAST_UPDATE} ? {last_update > CONFIG_LAST_UPDATE}")
-        print(f"[CONFIG_WATCHER DEBUG] Raw config keys: {list(new_config.keys())}")
+            raw_last_update = new_config.get("last_update")
+            try:
+                last_update = float(raw_last_update) if raw_last_update is not None else check_ts
+            except (TypeError, ValueError):
+                print(
+                    f"[CONFIG_WATCHER] last_update non valido ({raw_last_update}), uso timestamp corrente {check_ts}"
+                )
+                last_update = check_ts
 
-        if last_update > CONFIG_LAST_UPDATE:
             old_sim_speed = SIM_SPEED_FACTOR
-            new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
+            new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", old_sim_speed))
 
-            print(f"[CONFIG_WATCHER] Configurazione aggiornata dal backend (timestamp: {last_update})")
-            print(f"[CONFIG_WATCHER] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
+            has_timestamp_update = last_update > CONFIG_LAST_UPDATE
+            has_speed_update = new_sim_speed != old_sim_speed
 
-            SIM_SPEED_FACTOR = new_sim_speed
-            CONFIG_LAST_UPDATE = last_update
+            print(
+                f"[CONFIG_WATCHER] tick: last_update={last_update}, "
+                f"prev_last_update={CONFIG_LAST_UPDATE}, sim_speed_factor={old_sim_speed}"
+            )
 
-            # Applica il nuovo fattore anche alle simulazioni già in corso
-            if new_sim_speed != old_sim_speed:
-                print(f"[CONFIG_WATCHER] Fattore cambiato, aggiornamento ETA simulazioni attive...")
-                await refresh_active_simulations_expected_eta()
+            # Aggiorna se cambia il timestamp oppure il valore effettivo.
+            if has_timestamp_update or has_speed_update:
+                print(
+                    f"[CONFIG_WATCHER] Config aggiornata: "
+                    f"timestamp_changed={has_timestamp_update}, speed_changed={has_speed_update}"
+                )
+                print(f"[CONFIG_WATCHER] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
+
+                SIM_SPEED_FACTOR = new_sim_speed
+                if has_timestamp_update:
+                    CONFIG_LAST_UPDATE = last_update
+
+                if has_speed_update:
+                    print("[CONFIG_WATCHER] Fattore cambiato, aggiornamento ETA simulazioni attive...")
+                    await refresh_active_simulations_expected_eta()
+
+        except Exception as e:
+            # Evita che il task termini silenziosamente.
+            print(f"[CONFIG_WATCHER ERROR] Errore nel watcher configurazione: {e}")
+
+
+def _task_exception_logger(task: asyncio.Task) -> None:
+    """Logga eventuali eccezioni non gestite dei task background."""
+    try:
+        exc = task.exception()
+        if exc is not None:
+            print(f"[TASK ERROR] Task '{task.get_name()}' terminato con errore: {exc}")
+    except asyncio.CancelledError:
+        print(f"[TASK INFO] Task '{task.get_name()}' cancellato")
 
 
 # =============================================================================
@@ -951,5 +984,8 @@ async def startup():
     print("Worker avviato (real + simulation)")
     print("=" * 60)
 
-    asyncio.create_task(config_watcher())
-    asyncio.create_task(periodic_cleanup_task())
+    config_task = asyncio.create_task(config_watcher(), name="config_watcher")
+    cleanup_task = asyncio.create_task(periodic_cleanup_task(), name="periodic_cleanup")
+
+    config_task.add_done_callback(_task_exception_logger)
+    cleanup_task.add_done_callback(_task_exception_logger)
