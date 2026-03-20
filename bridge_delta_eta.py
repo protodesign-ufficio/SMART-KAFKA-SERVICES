@@ -289,6 +289,10 @@ async def _doc_delta_eta() -> DeltaEtaEvent:
 # FUNZIONI UTILITY
 # =============================================================================
 
+def log(msg: str) -> None:
+    """Log con timestamp e flush esplicito per evitare buffering nei container."""
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
 def normalize_nmea(raw_value) -> Optional[str]:
     """
     Normalizza un messaggio NMEA grezzo in formato standard AIVDM.
@@ -906,23 +910,37 @@ async def config_watcher():
     while True:
         await asyncio.sleep(120)  # Check ogni 2 minuti
 
-        print("[DELTA ETA CONFIG] Watcher tick (120s)")
-        new_config = await asyncio.to_thread(load_kafka_config_from_dashboard)
-        last_update = float(new_config.get("last_update", 0))
+        log("[DELTA ETA CONFIG] Watcher tick (120s)")
 
-        if last_update > CONFIG_LAST_UPDATE:
-            old_sim_speed = SIM_SPEED_FACTOR
-            new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
+        try:
+            new_config = await asyncio.to_thread(load_kafka_config_from_dashboard)
+            last_update = float(new_config.get("last_update", 0))
 
-            print("[DELTA ETA CONFIG] Ricaricamento configurazione...")
-            print(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
+            if last_update > CONFIG_LAST_UPDATE:
+                old_sim_speed = SIM_SPEED_FACTOR
+                new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
 
-            SIM_SPEED_FACTOR = new_sim_speed
-            CONFIG_LAST_UPDATE = last_update
+                log("[DELTA ETA CONFIG] Ricaricamento configurazione...")
+                log(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
 
-            # Applica il nuovo fattore anche alle simulazioni già in corso
-            if new_sim_speed != old_sim_speed:
-                await refresh_active_simulations_expected_eta()
+                SIM_SPEED_FACTOR = new_sim_speed
+                CONFIG_LAST_UPDATE = last_update
+
+                # Applica il nuovo fattore anche alle simulazioni già in corso
+                if new_sim_speed != old_sim_speed:
+                    await refresh_active_simulations_expected_eta()
+        except Exception as e:
+            log(f"[DELTA ETA CONFIG ERROR] watcher crash avoided: {e}")
+
+
+def _log_task_failure(task: asyncio.Task) -> None:
+    """Logga eventuali crash dei task in background."""
+    try:
+        exc = task.exception()
+        if exc is not None:
+            log(f"[DELTA ETA TASK ERROR] Task '{task.get_name()}' terminato con errore: {exc}")
+    except asyncio.CancelledError:
+        log(f"[DELTA ETA TASK INFO] Task '{task.get_name()}' cancellato")
 
 
 # =============================================================================
@@ -938,17 +956,19 @@ async def startup():
     - Watcher configurazione (ricarica SIM_SPEED_FACTOR ogni 2 minuti)
     - Cleanup periodico navi inattive (ogni 5 minuti)
     """
-    print("=" * 60)
-    print("BRIDGE DELTA ETA - Analytics Worker")
-    print("=" * 60)
-    print(f"Kafka Bootstrap: {BOOTSTRAP_SERVERS}")
-    print(f"Topic Input:     {MAIN_TOPIC}, {SIM_TOPIC}")
-    print(f"Topic Output:    {ANALYTICS_TOPIC}")
-    print(f"API Backend:     {API_BASE}")
-    print(f"Sim Speed Factor: {SIM_SPEED_FACTOR}")
-    print("=" * 60)
-    print("Worker avviato (real + simulation)")
-    print("=" * 60)
+    log("=" * 60)
+    log("BRIDGE DELTA ETA - Analytics Worker")
+    log("=" * 60)
+    log(f"Kafka Bootstrap: {BOOTSTRAP_SERVERS}")
+    log(f"Topic Input:     {MAIN_TOPIC}, {SIM_TOPIC}")
+    log(f"Topic Output:    {ANALYTICS_TOPIC}")
+    log(f"API Backend:     {API_BASE}")
+    log(f"Sim Speed Factor: {SIM_SPEED_FACTOR}")
+    log("=" * 60)
+    log("Worker avviato (real + simulation)")
+    log("=" * 60)
 
-    asyncio.create_task(config_watcher())
-    asyncio.create_task(periodic_cleanup_task())
+    config_task = asyncio.create_task(config_watcher(), name="deltaeta_config_watcher")
+    cleanup_task = asyncio.create_task(periodic_cleanup_task(), name="deltaeta_cleanup")
+    config_task.add_done_callback(_log_task_failure)
+    cleanup_task.add_done_callback(_log_task_failure)
