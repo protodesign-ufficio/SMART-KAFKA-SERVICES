@@ -717,6 +717,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
         # Recupero tempo_percorrenza dall'API per il cleanup (non bloccante)
         tempo_percorrenza: Optional[float] = None
+        percorsi: Optional[list] = None
         try:
             percorsi = await _fetch_active_percorsi(mmsi)
             if percorsi:
@@ -727,6 +728,22 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
                         break
         except Exception:
             pass
+
+        # Pre-calcolo ETA attesa fuori dal lock per evitare attese bloccanti
+        precomputed_expected_eta: Optional[float] = None
+        precomputed_start_ts: Optional[float] = None
+        if source == "real":
+            precomputed_expected_eta = await get_expected_eta_from_api(mmsi)
+        else:
+            if simulation_state.get(key) is None:
+                # Usa timestamp Kafka se disponibile, fallback wall clock
+                msg_ts = getattr(msg, "timestamp", None)
+                if isinstance(msg_ts, (int, float)):
+                    precomputed_start_ts = float(msg_ts) / 1000.0
+                else:
+                    precomputed_start_ts = time.time()
+                if precomputed_start_ts is not None:
+                    precomputed_expected_eta = await get_simulation_expected_eta(mmsi, precomputed_start_ts)
 
         async with state_lock:
             # Aggiorna database navi
@@ -743,22 +760,16 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             ship["destination"] = destination
             destination_norm = destination
 
-            # Calcola ETA attesa in base alla sorgente
+            # Calcola ETA attesa in base alla sorgente senza I/O sotto lock
             if source == "real":
-                # Per navi reali: recupera da API
-                expected_eta = await get_expected_eta_from_api(mmsi)
+                expected_eta = precomputed_expected_eta
             else:
-                # Per simulazioni: calcola al primo messaggio e memorizza
                 sim = simulation_state.get(key)
-                if not sim:
-                    start_ts = time.time()
-                    expected_eta = await get_simulation_expected_eta(mmsi, start_ts)
-                    if expected_eta is None:
-                        await msg.ack()
-                        return
-                    simulation_state[key] = {"start_ts": start_ts, "expected_eta": expected_eta}
-                else:
-                    expected_eta = sim["expected_eta"]
+                if not sim and precomputed_expected_eta is not None and precomputed_start_ts is not None:
+                    simulation_state[key] = {"start_ts": precomputed_start_ts, "expected_eta": precomputed_expected_eta}
+                    expected_eta = precomputed_expected_eta
+                elif sim:
+                    expected_eta = sim.get("expected_eta")
 
         if expected_eta is None:
             await msg.ack()
