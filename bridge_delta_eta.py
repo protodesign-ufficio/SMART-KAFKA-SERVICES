@@ -944,7 +944,7 @@ async def config_watcher():
             new_config = await asyncio.to_thread(load_kafka_config_from_dashboard)
             last_update = float(new_config.get("last_update", 0))
 
-            if last_update > CONFIG_LAST_UPDATE:
+            if SIM_SPEED_FACTOR != _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0)):
                 old_sim_speed = SIM_SPEED_FACTOR
                 new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
 
