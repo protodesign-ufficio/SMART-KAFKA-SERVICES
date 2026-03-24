@@ -102,7 +102,7 @@ import time
 import datetime
 import operator
 from functools import reduce
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import requests
 from faststream import FastStream
@@ -198,6 +198,9 @@ Struttura valore: dati AIS + campi calcolati (last_seen, tempo_percorrenza, etc.
 
 multipart_buffer: Dict[tuple, dict] = {}
 """Dict[tuple, dict]: Buffer per ricomposizione messaggi NMEA multipart"""
+
+multipart_buffer_no_seq: Dict[tuple, List[dict]] = {}
+"""Buffer multipart per messaggi con sequence ID assente (seq='0')."""
 
 simulation_state: Dict[ShipKey, dict] = {}
 """
@@ -376,19 +379,54 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
         chan = parts[4]
         payload = parts[5]
 
-        key = (topic, chan, seq)
-        entry = multipart_buffer.setdefault(key, {"total": total, "parts": {}, "ts": time.time()})
+        if seq != "0":
+            key = (topic, chan, seq)
+            entry = multipart_buffer.setdefault(key, {"total": total, "parts": {}, "ts": time.time()})
 
-        entry["parts"][index] = payload
-        entry["ts"] = time.time()
+            entry["parts"][index] = payload
+            entry["ts"] = time.time()
 
-        if len(entry["parts"]) == total:
-            full = "".join(entry["parts"][i] for i in range(1, total + 1))
-            del multipart_buffer[key]
+            if len(entry["parts"]) == total:
+                full = "".join(entry["parts"][i] for i in range(1, total + 1))
+                del multipart_buffer[key]
 
-            body = f"AIVDM,1,1,,{chan},{full},0"
-            chk = compute_checksum(body)
-            return f"!{body}*{chk}"
+                body = f"AIVDM,1,1,,{chan},{full},0"
+                chk = compute_checksum(body)
+                return f"!{body}*{chk}"
+        else:
+            # Sequence ID mancante: mantieni una coda di messaggi in-flight per canale.
+            # Questo evita collisioni quando più navi inviano multipart in parallelo con seq vuoto.
+            queue_key = (topic, chan, total)
+            queue = multipart_buffer_no_seq.setdefault(queue_key, [])
+
+            target_entry = None
+            if index == 1:
+                target_entry = {"total": total, "parts": {}, "ts": time.time()}
+                queue.append(target_entry)
+            else:
+                for entry in queue:
+                    if index not in entry["parts"] and len(entry["parts"]) < entry["total"]:
+                        target_entry = entry
+                        break
+                if target_entry is None:
+                    target_entry = {"total": total, "parts": {}, "ts": time.time()}
+                    queue.append(target_entry)
+
+            target_entry["parts"][index] = payload
+            target_entry["ts"] = time.time()
+
+            if len(target_entry["parts"]) == target_entry["total"]:
+                full = "".join(target_entry["parts"][i] for i in range(1, target_entry["total"] + 1))
+                try:
+                    queue.remove(target_entry)
+                except ValueError:
+                    pass
+                if not queue:
+                    del multipart_buffer_no_seq[queue_key]
+
+                body = f"AIVDM,1,1,,{chan},{full},0"
+                chk = compute_checksum(body)
+                return f"!{body}*{chk}"
     except Exception:
         return None
 
@@ -596,6 +634,11 @@ def cleanup_multipart_buffer() -> None:
     for k, v in list(multipart_buffer.items()):
         if now - v["ts"] > 5:
             del multipart_buffer[k]
+
+    for qk, queue in list(multipart_buffer_no_seq.items()):
+        queue[:] = [entry for entry in queue if now - entry["ts"] <= 5]
+        if not queue:
+            del multipart_buffer_no_seq[qk]
     last_cleanup = now
 
 
