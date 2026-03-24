@@ -766,7 +766,11 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             else:
                 sim = simulation_state.get(key)
                 if not sim and precomputed_expected_eta is not None and precomputed_start_ts is not None:
-                    simulation_state[key] = {"start_ts": precomputed_start_ts, "expected_eta": precomputed_expected_eta}
+                    simulation_state[key] = {
+                        "start_ts": precomputed_start_ts,
+                        "expected_eta": precomputed_expected_eta,
+                        "tempo_percorrenza": tempo_percorrenza,
+                    }
                     expected_eta = precomputed_expected_eta
                 elif sim:
                     expected_eta = sim.get("expected_eta")
@@ -848,7 +852,7 @@ async def refresh_active_simulations_expected_eta() -> None:
     """
     async with state_lock:
         snapshot = [
-            (key, sim.get("start_ts"), sim.get("expected_eta"))
+            (key, dict(sim))
             for key, sim in simulation_state.items()
         ]
 
@@ -858,13 +862,26 @@ async def refresh_active_simulations_expected_eta() -> None:
     updated = 0
     skipped = 0
 
-    for key, start_ts, old_expected_eta in snapshot:
+    for key, sim_snapshot in snapshot:
+        start_ts = sim_snapshot.get("start_ts")
+        old_expected_eta = sim_snapshot.get("expected_eta")
+        durata_min = sim_snapshot.get("tempo_percorrenza")
+
         if start_ts is None:
             skipped += 1
             continue
 
         _, mmsi = key
-        new_expected_eta = await get_simulation_expected_eta(mmsi, float(start_ts))
+
+        new_expected_eta: Optional[float] = None
+        try:
+            if durata_min is not None:
+                new_expected_eta = float(start_ts) + (float(durata_min) / SIM_SPEED_FACTOR) * 60.0
+            else:
+                new_expected_eta = await get_simulation_expected_eta(mmsi, float(start_ts))
+        except Exception:
+            new_expected_eta = None
+
         if new_expected_eta is None:
             skipped += 1
             continue
