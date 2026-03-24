@@ -705,6 +705,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         eta = calculate_eta_timestamp(data)
         print(f"[DELTA ETA] MMSI={mmsi} ETA={eta} SOURCE={source} TOPIC={topic}")
         if eta is None:
+            print(f"[DELTA ETA SKIP] MMSI={mmsi} source={source} motivo=eta_non_presente_o_non_valida")
             await msg.ack()
             return
         print(f"[DELTA ETA] {data}")
@@ -743,7 +744,14 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
                 else:
                     precomputed_start_ts = time.time()
                 if precomputed_start_ts is not None:
-                    precomputed_expected_eta = await get_simulation_expected_eta(mmsi, precomputed_start_ts)
+                    # Usa il tempo_percorrenza già recuperato per evitare una seconda fetch backend.
+                    if tempo_percorrenza is not None:
+                        try:
+                            precomputed_expected_eta = precomputed_start_ts + (float(tempo_percorrenza) / float(SIM_SPEED_FACTOR)) * 60.0
+                        except Exception:
+                            precomputed_expected_eta = None
+                    if precomputed_expected_eta is None:
+                        precomputed_expected_eta = await get_simulation_expected_eta(mmsi, precomputed_start_ts)
 
         async with state_lock:
             # Aggiorna database navi
@@ -776,6 +784,10 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
                     expected_eta = sim.get("expected_eta")
 
         if expected_eta is None:
+            print(
+                f"[DELTA ETA SKIP] MMSI={mmsi} source={source} motivo=expected_eta_non_disponibile "
+                f"tempo_percorrenza={tempo_percorrenza} has_sim_state={key in simulation_state}"
+            )
             await msg.ack()
             return
 
