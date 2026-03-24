@@ -678,7 +678,11 @@ async def cleanup_inactive_ships() -> None:
 # CORE PROCESSOR - Elaborazione Messaggi AIS
 # =============================================================================
 
-async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simulation"]) -> None:
+async def process_ais_message(
+    msg: KafkaMessage,
+    source: Literal["real", "simulation"],
+    topic_override: Optional[str] = None,
+) -> None:
     """
     Processa un messaggio AIS e pubblica eventi delta_eta.
     
@@ -709,10 +713,11 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
     raw = normalize_nmea(msg.body)
     if not raw or not raw.startswith("!"):
+        print(f"[DELTA ETA SKIP] source={source} topic={topic_override or getattr(msg, 'topic', MAIN_TOPIC)} motivo=nmea_non_valido")
         await msg.ack()
         return
 
-    topic = getattr(msg, "topic", MAIN_TOPIC)
+    topic = topic_override or getattr(msg, "topic", MAIN_TOPIC)
 
     parts = raw.split(",")
     final = raw
@@ -727,6 +732,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             final = None
 
     if not final:
+        print(f"[DELTA ETA SKIP] source={source} topic={topic} motivo=multipart_incompleto")
         await msg.ack()
         return
 
@@ -736,6 +742,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
         mmsi = str(data.get("mmsi") or "")
         if not mmsi:
+            print(f"[DELTA ETA SKIP] source={source} topic={topic} motivo=mmsi_assente")
             await msg.ack()
             return
 
@@ -874,7 +881,7 @@ async def ais_consumer_real(msg: KafkaMessage):
     msg : KafkaMessage
         Messaggio Kafka contenente dati AIS reali
     """
-    await process_ais_message(msg, source="real")
+    await process_ais_message(msg, source="real", topic_override=MAIN_TOPIC)
 
 
 @broker.subscriber(SIM_TOPIC)
@@ -890,7 +897,7 @@ async def ais_consumer_sim(msg: KafkaMessage):
     msg : KafkaMessage
         Messaggio Kafka contenente dati AIS simulati
     """
-    await process_ais_message(msg, source="simulation")
+    await process_ais_message(msg, source="simulation", topic_override=SIM_TOPIC)
 
 
 # =============================================================================
