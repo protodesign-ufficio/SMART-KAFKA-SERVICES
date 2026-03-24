@@ -311,8 +311,24 @@ def normalize_nmea(raw_value) -> Optional[str]:
         Messaggio normalizzato o None se parsing fallisce
     """
     try:
+        if isinstance(raw_value, dict):
+            # Formato tipico dei messaggi su ais_simulation.raw:
+            # {"fields": {"value": "!AIVDM,..."}, ...}
+            fields = raw_value.get("fields")
+            if isinstance(fields, dict):
+                v = fields.get("value")
+                if isinstance(v, str):
+                    raw_value = v
+            if isinstance(raw_value, dict):
+                v = raw_value.get("value")
+                if isinstance(v, str):
+                    raw_value = v
+
         if isinstance(raw_value, bytes):
             raw_value = raw_value.decode("utf-8", errors="ignore")
+
+        if not isinstance(raw_value, str):
+            return None
 
         raw_value = raw_value.strip()
 
@@ -321,6 +337,8 @@ def normalize_nmea(raw_value) -> Optional[str]:
                 data = json.loads(raw_value)
                 if "fields" in data and "value" in data["fields"]:
                     return data["fields"]["value"]
+                if "value" in data and isinstance(data["value"], str):
+                    return data["value"]
             except Exception:
                 pass
 
@@ -897,6 +915,9 @@ async def ais_consumer_sim(msg: KafkaMessage):
     msg : KafkaMessage
         Messaggio Kafka contenente dati AIS simulati
     """
+    body_type = type(msg.body).__name__
+    body_len = len(msg.body) if isinstance(msg.body, (bytes, str, dict, list)) else -1
+    print(f"[DELTA ETA IN] source=simulation topic={SIM_TOPIC} body_type={body_type} body_len={body_len}")
     await process_ais_message(msg, source="simulation", topic_override=SIM_TOPIC)
 
 
