@@ -946,9 +946,9 @@ async def config_watcher():
             log(f"[DELTA ETA CONFIG] Configurazione ricevuta: sim_speed_factor={new_config.get('sim_speed_factor', '<ASSENTE>')}")
             log(f"")
 
-            if SIM_SPEED_FACTOR != new_config.get("sim_speed_factor", 1.0):
+            if SIM_SPEED_FACTOR != _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0)):
                 old_sim_speed = SIM_SPEED_FACTOR
-                new_sim_speed = new_config.get("sim_speed_factor", 1.0)
+                new_sim_speed = _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0))
 
                 log("[DELTA ETA CONFIG] Ricaricamento configurazione...")
                 log(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
