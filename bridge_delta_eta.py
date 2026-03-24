@@ -941,7 +941,7 @@ async def config_watcher():
         log("[DELTA ETA CONFIG] Watcher tick (120s)")
 
         try:
-            new_config = await asyncio.to_thread(load_kafka_config_from_dashboard)
+            new_config = load_kafka_config_from_dashboard()
             #last_update = float(new_config.get("last_update", 0))
             log(f"[DELTA ETA CONFIG] Configurazione ricevuta: sim_speed_factor={new_config.get('sim_speed_factor', '<ASSENTE>')}")
             log(f"")
