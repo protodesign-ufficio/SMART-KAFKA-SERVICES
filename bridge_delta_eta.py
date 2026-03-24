@@ -942,7 +942,7 @@ async def config_watcher():
 
         try:
             new_config = await asyncio.to_thread(load_kafka_config_from_dashboard)
-            last_update = float(new_config.get("last_update", 0))
+            #last_update = float(new_config.get("last_update", 0))
 
             if SIM_SPEED_FACTOR != _parse_sim_speed_factor(new_config.get("sim_speed_factor", 1.0)):
                 old_sim_speed = SIM_SPEED_FACTOR
@@ -952,7 +952,7 @@ async def config_watcher():
                 log(f"[DELTA ETA CONFIG] SIM_SPEED_FACTOR: {old_sim_speed} -> {new_sim_speed}")
 
                 SIM_SPEED_FACTOR = new_sim_speed
-                CONFIG_LAST_UPDATE = last_update
+                #CONFIG_LAST_UPDATE = last_update
 
                 # Applica il nuovo fattore anche alle simulazioni già in corso
                 if new_sim_speed != old_sim_speed:
