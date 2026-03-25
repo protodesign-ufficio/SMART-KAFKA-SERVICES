@@ -196,11 +196,9 @@ Dict[ShipKey, dict]: Database in-memory delle navi.
 Struttura valore: dati AIS + campi calcolati (last_seen, tempo_percorrenza, etc.)
 """
 
-multipart_buffer: Dict[tuple, dict] = {}
-"""Dict[tuple, dict]: Buffer per ricomposizione messaggi NMEA multipart"""
-
 multipart_buffer_no_seq: Dict[tuple, List[dict]] = {}
-"""Buffer multipart per messaggi con sequence ID assente (seq='0')."""
+"""Buffer multipart a coda per ricomposizione frammenti AIS multipart.
+Indicizzato per (topic, canale, total_frammenti)."""
 
 simulation_state: Dict[ShipKey, dict] = {}
 """
@@ -375,8 +373,12 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
     """
     Ricompone messaggi AIS multipart (AIVDM con n>1 frammenti).
     
-    Utilizza un buffer indicizzato per (topic, canale, sequenza) per
+    Utilizza una coda ordinata per tempo per (topic, canale) per
     raccogliere i frammenti e ricomporli quando sono tutti disponibili.
+    
+    NON usa il campo seq come chiave perché seq è un digit 0-9 condiviso
+    tra tutti i vascelli sullo stesso canale: con 2+ vascelli attivi
+    le collisioni sono inevitabili e causano mescolamento dei frammenti.
     
     Parameters
     ----------
@@ -393,58 +395,43 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
     try:
         total = int(parts[1])
         index = int(parts[2])
-        seq = parts[3] or "0"
         chan = parts[4]
         payload = parts[5]
 
-        if seq != "0":
-            key = (topic, chan, seq)
-            entry = multipart_buffer.setdefault(key, {"total": total, "parts": {}, "ts": time.time()})
+        queue_key = (topic, chan, total)
+        queue = multipart_buffer_no_seq.setdefault(queue_key, [])
 
-            entry["parts"][index] = payload
-            entry["ts"] = time.time()
-
-            if len(entry["parts"]) == total:
-                full = "".join(entry["parts"][i] for i in range(1, total + 1))
-                del multipart_buffer[key]
-
-                body = f"AIVDM,1,1,,{chan},{full},0"
-                chk = compute_checksum(body)
-                return f"!{body}*{chk}"
+        target_entry = None
+        if index == 1:
+            # Nuovo messaggio multipart: crea entry e accoda
+            target_entry = {"total": total, "parts": {}, "ts": time.time()}
+            queue.append(target_entry)
         else:
-            # Sequence ID mancante: mantieni una coda di messaggi in-flight per canale.
-            # Questo evita collisioni quando più navi inviano multipart in parallelo con seq vuoto.
-            queue_key = (topic, chan, total)
-            queue = multipart_buffer_no_seq.setdefault(queue_key, [])
-
-            target_entry = None
-            if index == 1:
+            # Frammento successivo: trova la entry più vecchia compatibile
+            for entry in queue:
+                if index not in entry["parts"] and len(entry["parts"]) < entry["total"]:
+                    target_entry = entry
+                    break
+            if target_entry is None:
+                # Nessuna entry compatibile, crea nuova (frammento orfano)
                 target_entry = {"total": total, "parts": {}, "ts": time.time()}
                 queue.append(target_entry)
-            else:
-                for entry in queue:
-                    if index not in entry["parts"] and len(entry["parts"]) < entry["total"]:
-                        target_entry = entry
-                        break
-                if target_entry is None:
-                    target_entry = {"total": total, "parts": {}, "ts": time.time()}
-                    queue.append(target_entry)
 
-            target_entry["parts"][index] = payload
-            target_entry["ts"] = time.time()
+        target_entry["parts"][index] = payload
+        target_entry["ts"] = time.time()
 
-            if len(target_entry["parts"]) == target_entry["total"]:
-                full = "".join(target_entry["parts"][i] for i in range(1, target_entry["total"] + 1))
-                try:
-                    queue.remove(target_entry)
-                except ValueError:
-                    pass
-                if not queue:
-                    del multipart_buffer_no_seq[queue_key]
+        if len(target_entry["parts"]) == target_entry["total"]:
+            full = "".join(target_entry["parts"][i] for i in range(1, target_entry["total"] + 1))
+            try:
+                queue.remove(target_entry)
+            except ValueError:
+                pass
+            if not queue:
+                del multipart_buffer_no_seq[queue_key]
 
-                body = f"AIVDM,1,1,,{chan},{full},0"
-                chk = compute_checksum(body)
-                return f"!{body}*{chk}"
+            body = f"AIVDM,1,1,,{chan},{full},0"
+            chk = compute_checksum(body)
+            return f"!{body}*{chk}"
     except Exception:
         return None
 
@@ -519,16 +506,34 @@ def calculate_eta_timestamp(decoded: dict) -> Optional[float]:
         return None
 
 
+_percorsi_cache: Dict[str, tuple] = {}
+"""Cache in-memory per risultati _fetch_active_percorsi: {mmsi: (timestamp, result)}"""
+
+_PERCORSI_CACHE_TTL: float = 120.0
+"""Durata cache percorsi in secondi (2 minuti)"""
+
+
 async def _fetch_active_percorsi(mmsi: str) -> Optional[list]:
-    """Recupera in modo non bloccante i percorsi attivi del vascello."""
+    """Recupera in modo non bloccante i percorsi attivi del vascello (con cache)."""
+    now = time.time()
+
+    # Controlla cache
+    cached = _percorsi_cache.get(mmsi)
+    if cached is not None:
+        ts, result = cached
+        if now - ts < _PERCORSI_CACHE_TTL:
+            return result
+
     try:
         def _request() -> Optional[list]:
-            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
+            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=50)
             if r.status_code != 200:
                 return None
             return r.json().get("percorsi", [])
 
-        return await asyncio.to_thread(_request)
+        result = await asyncio.to_thread(_request)
+        _percorsi_cache[mmsi] = (now, result)
+        return result
     except Exception:
         return None
 
@@ -637,24 +642,25 @@ async def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[fl
         return None
 
 
+MULTIPART_TTL_SEC = 120
+"""float: TTL dei frammenti multipart nel buffer (secondi). Deve essere
+sufficiente a coprire il tempo di elaborazione dei messaggi con chiamate API,
+altrimenti i frammenti di altri vascelli vengono eliminati prematuramente."""
+
 def cleanup_multipart_buffer() -> None:
     """
     Pulizia periodica del buffer multipart.
     
-    Rimuove le ricomposizioni stale (>5 secondi) per evitare
+    Rimuove le ricomposizioni stale (>MULTIPART_TTL_SEC secondi) per evitare
     crescita indefinita della memoria.
     """
     global last_cleanup
     now = time.time()
-    if now - last_cleanup <= 10:
+    if now - last_cleanup <= 60:
         return
 
-    for k, v in list(multipart_buffer.items()):
-        if now - v["ts"] > 5:
-            del multipart_buffer[k]
-
     for qk, queue in list(multipart_buffer_no_seq.items()):
-        queue[:] = [entry for entry in queue if now - entry["ts"] <= 5]
+        queue[:] = [entry for entry in queue if now - entry["ts"] <= MULTIPART_TTL_SEC]
         if not queue:
             del multipart_buffer_no_seq[qk]
     last_cleanup = now
@@ -727,7 +733,6 @@ async def process_ais_message(
       e memorizzata in simulation_state
     """
     cleanup_multipart_buffer()
-    await cleanup_inactive_ships()
 
     raw = normalize_nmea(msg.body)
     if not raw or not raw.startswith("!"):
@@ -802,7 +807,25 @@ async def process_ais_message(
         precomputed_expected_eta: Optional[float] = None
         precomputed_start_ts: Optional[float] = None
         if source == "real":
-            precomputed_expected_eta = await get_expected_eta_from_api(mmsi)
+            # Calcola da percorsi già recuperati per evitare una seconda chiamata HTTP
+            if percorsi:
+                for p in percorsi:
+                    if p.get("assegnazione", {}).get("virtuale") is False:
+                        _perc = p.get("percorso")
+                        if _perc:
+                            _partenza = _perc.get("orario_partenza_schedulato")
+                            _durata = _perc.get("tempo_percorrenza")
+                            if _partenza and _durata is not None:
+                                try:
+                                    precomputed_expected_eta = (
+                                        dt.fromisoformat(_partenza) + timedelta(minutes=float(_durata))
+                                    ).timestamp()
+                                except Exception:
+                                    pass
+                        break
+            # Fallback: se percorsi non era disponibile, chiama l'API
+            if precomputed_expected_eta is None:
+                precomputed_expected_eta = await get_expected_eta_from_api(mmsi)
         else:
             if simulation_state.get(key) is None:
                 # Usa timestamp Kafka se disponibile, fallback wall clock
@@ -879,7 +902,7 @@ async def process_ais_message(
 
     except Exception as e:
         print(f"[DELTA ETA ERROR] {e}")
-        await msg.nack()
+        await msg.ack()
 
 
 # =============================================================================
