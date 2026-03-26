@@ -220,7 +220,7 @@ def _config_update_thread_target():
     FastStream per evitare conflitti.
     """
     while True:
-        time.sleep(120)  # Check ogni 2 minuti
+        time.sleep(30)  # Check ogni 30 secondi
         try:
             periodic_config_check()
         except Exception as e:

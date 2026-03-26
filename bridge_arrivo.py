@@ -97,7 +97,7 @@ import operator
 import os
 import time
 from functools import reduce
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import requests
 from faststream import FastStream
@@ -196,11 +196,15 @@ Struttura valore:
 }
 """
 
-multipart_buffer: Dict[tuple, dict] = {}
-"""Dict[tuple, dict]: Buffer per ricomposizione messaggi NMEA multipart"""
+multipart_buffer: Dict[tuple, List] = {}
+"""Buffer multipart a coda per ricomposizione frammenti AIS multipart.
+Indicizzato per (topic, canale, total_frammenti)."""
 
 last_cleanup = time.time()
 """float: Timestamp ultima pulizia buffer multipart"""
+
+MULTIPART_TTL_SEC = 120
+"""float: TTL dei frammenti multipart nel buffer (secondi)."""
 
 
 # =============================================================================
@@ -227,13 +231,30 @@ def log(msg: str) -> None:
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _match_virtuale(virtuale_val, target_bool: bool) -> bool:
+    """Confronto robusto per il campo 'virtuale' che può essere bool, str o None."""
+    if isinstance(virtuale_val, bool):
+        return virtuale_val == target_bool
+    if isinstance(virtuale_val, str):
+        return (virtuale_val.lower() in ("true", "1")) == target_bool
+    if virtuale_val is None:
+        return not target_bool
+    return bool(virtuale_val) == target_bool
+
+
 def normalize_nmea(raw_value) -> Optional[str]:
     """
     Normalizza un messaggio NMEA grezzo in formato standard AIVDM.
 
+    Gestisce diversi formati di input:
+    - dict (da FastStream auto-deserializzazione JSON, es. simulazione)
+    - Bytes UTF-8
+    - Stringhe con wrapper JSON (es. da Kafka Connect)
+    - Messaggi AIVDM diretti
+
     Parameters
     ----------
-    raw_value : bytes | str
+    raw_value : dict | bytes | str
         Messaggio grezzo
 
     Returns
@@ -242,8 +263,23 @@ def normalize_nmea(raw_value) -> Optional[str]:
         Messaggio normalizzato o None se parsing fallisce
     """
     try:
+        # Gestione input dict (tipico da ais_simulation.raw deserializzato da FastStream)
+        if isinstance(raw_value, dict):
+            fields = raw_value.get("fields")
+            if isinstance(fields, dict):
+                v = fields.get("value")
+                if isinstance(v, str):
+                    raw_value = v
+            if isinstance(raw_value, dict):
+                v = raw_value.get("value")
+                if isinstance(v, str):
+                    raw_value = v
+
         if isinstance(raw_value, bytes):
             raw_value = raw_value.decode("utf-8", errors="ignore")
+
+        if not isinstance(raw_value, str):
+            return None
 
         raw_value = raw_value.strip()
 
@@ -252,6 +288,8 @@ def normalize_nmea(raw_value) -> Optional[str]:
                 data = json.loads(raw_value)
                 if "fields" in data and "value" in data["fields"]:
                     return data["fields"]["value"]
+                if "value" in data and isinstance(data["value"], str):
+                    return data["value"]
             except Exception:
                 pass
 
@@ -288,6 +326,10 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
     """
     Ricompone messaggi AIS multipart (AIVDM con n>1 frammenti).
 
+    NON usa il campo seq come chiave perché seq è un digit 0-9 condiviso
+    tra tutti i vascelli sullo stesso canale: con 2+ vascelli attivi
+    le collisioni sono inevitabili e causano mescolamento dei frammenti.
+
     Parameters
     ----------
     topic : str
@@ -303,19 +345,36 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
     try:
         total = int(parts[1])
         index = int(parts[2])
-        seq = parts[3] or "0"
         chan = parts[4]
         payload = parts[5]
 
-        key = (topic, chan, seq)
-        entry = multipart_buffer.setdefault(key, {"total": total, "parts": {}, "ts": time.time()})
+        queue_key = (topic, chan, total)
+        queue = multipart_buffer.setdefault(queue_key, [])
 
-        entry["parts"][index] = payload
-        entry["ts"] = time.time()
+        target_entry = None
+        if index == 1:
+            target_entry = {"total": total, "parts": {}, "ts": time.time()}
+            queue.append(target_entry)
+        else:
+            for entry in queue:
+                if index not in entry["parts"] and len(entry["parts"]) < entry["total"]:
+                    target_entry = entry
+                    break
+            if target_entry is None:
+                target_entry = {"total": total, "parts": {}, "ts": time.time()}
+                queue.append(target_entry)
 
-        if len(entry["parts"]) == total:
-            full = "".join(entry["parts"][i] for i in range(1, total + 1))
-            del multipart_buffer[key]
+        target_entry["parts"][index] = payload
+        target_entry["ts"] = time.time()
+
+        if len(target_entry["parts"]) == target_entry["total"]:
+            full = "".join(target_entry["parts"][i] for i in range(1, target_entry["total"] + 1))
+            try:
+                queue.remove(target_entry)
+            except ValueError:
+                pass
+            if not queue:
+                del multipart_buffer[queue_key]
 
             body = f"AIVDM,1,1,,{chan},{full},0"
             chk = compute_checksum(body)
@@ -329,16 +388,17 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
 def cleanup_multipart_buffer() -> None:
     """
     Pulizia periodica del buffer multipart.
-    Rimuove le ricomposizioni stale (>5 secondi).
+    Rimuove le ricomposizioni stale (>MULTIPART_TTL_SEC secondi).
     """
     global last_cleanup
     now = time.time()
-    if now - last_cleanup <= 10:
+    if now - last_cleanup <= 60:
         return
 
-    for k, v in list(multipart_buffer.items()):
-        if now - v["ts"] > 5:
-            del multipart_buffer[k]
+    for qk, queue in list(multipart_buffer.items()):
+        queue[:] = [entry for entry in queue if now - entry["ts"] <= MULTIPART_TTL_SEC]
+        if not queue:
+            del multipart_buffer[qk]
     last_cleanup = now
 
 
@@ -438,9 +498,12 @@ def extract_destination_coords_from_geom(geom_rotta) -> Optional[Tuple[float, fl
         return None
 
 
-def get_route_info(mmsi: str, is_simulation: bool) -> Optional[Tuple[float, float, str, str]]:
+async def get_route_info(mmsi: str, is_simulation: bool) -> Optional[Tuple[float, float, str, str]]:
     """
     Recupera le coordinate di destinazione e l'ID assegnazione dall'API backend.
+
+    Eseguita in modo non bloccante tramite asyncio.to_thread per evitare
+    di bloccare l'event loop durante le chiamate HTTP.
 
     Pipeline:
     1. ``GET /vascello/{mmsi}/percorso_attivo`` → ottiene percorso_id e assegnazione_id
@@ -460,64 +523,82 @@ def get_route_info(mmsi: str, is_simulation: bool) -> Optional[Tuple[float, floa
         Tupla (latitudine, longitudine, percorso_id, assegnazione_id)
         o None se non disponibile
     """
-    try:
-        # Step 1: Recupera percorso attivo
-        r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
-        if r.status_code != 200:
-            return None
-
-        percorsi = r.json().get("percorsi", [])
-        if not percorsi:
-            return None
-
-        # Cerca il percorso corrispondente (reale o virtuale)
-        percorso_data = None
-        percorso_id = None
-        assegnazione_id = None
-        for p in percorsi:
-            virtuale = p.get("assegnazione", {}).get("virtuale")
-            if virtuale is is_simulation:
-                assegnazione_id = p.get("assegnazione", {}).get("id")
-                percorso_data = p.get("percorso", {})
-                percorso_id = percorso_data.get("id") or percorso_data.get("_id")
-                break
-
-        if not percorso_data or not percorso_id or not assegnazione_id:
-            return None
-
-        # Step 2: Recupera dettagli percorso con geom_rotta
-        # Prima controlla se geom_rotta è già incluso nel percorso attivo
-        geom_rotta = percorso_data.get("geom_rotta")
-
-        if not geom_rotta:
-            # Se non c'è, facciamo la chiamata dedicata
-            r2 = requests.get(f"{API_BASE}/percorso/{percorso_id}", timeout=3)
-            if r2.status_code != 200:
+    def _blocking_get_route_info() -> Optional[Tuple[float, float, str, str]]:
+        try:
+            # Step 1: Recupera percorso attivo
+            log(f"[ROUTE API] MMSI={mmsi} Step 1: GET /vascello/{mmsi}/percorso_attivo ...")
+            r = requests.get(f"{API_BASE}/vascello/{mmsi}/percorso_attivo", timeout=30)
+            if r.status_code != 200:
+                log(f"[ROUTE API] MMSI={mmsi} Step 1 FALLITO: HTTP {r.status_code}")
                 return None
 
-            percorso_detail = r2.json()
-            geom_rotta = percorso_detail.get("geom_rotta")
+            percorsi = r.json().get("percorsi", [])
+            if not percorsi:
+                log(f"[ROUTE API] MMSI={mmsi} Step 1: lista percorsi vuota")
+                return None
 
-        if not geom_rotta:
+            log(f"[ROUTE API] MMSI={mmsi} Step 1 OK: {len(percorsi)} percorsi trovati")
+
+            # Cerca il percorso corrispondente (reale o virtuale)
+            percorso_data = None
+            percorso_id = None
+            assegnazione_id = None
+            for i, p in enumerate(percorsi):
+                ass = p.get("assegnazione", {})
+                virtuale = ass.get("virtuale")
+                log(f"[ROUTE API] MMSI={mmsi}   percorso[{i}] virtuale={virtuale!r} "
+                    f"(type={type(virtuale).__name__}) is_simulation={is_simulation}")
+                if _match_virtuale(virtuale, is_simulation):
+                    assegnazione_id = ass.get("id")
+                    percorso_data = p.get("percorso", {})
+                    percorso_id = percorso_data.get("id") or percorso_data.get("_id")
+                    log(f"[ROUTE API] MMSI={mmsi}   -> MATCH! percorso_id={percorso_id} "
+                        f"assegnazione_id={assegnazione_id}")
+                    break
+
+            if not percorso_data or not percorso_id or not assegnazione_id:
+                log(f"[ROUTE API] MMSI={mmsi} Nessun percorso trovato "
+                    f"(data={bool(percorso_data)} pid={percorso_id} aid={assegnazione_id})")
+                return None
+
+            # Step 2: Recupera dettagli percorso con geom_rotta
+            geom_rotta = percorso_data.get("geom_rotta")
+
+            if not geom_rotta:
+                log(f"[ROUTE API] MMSI={mmsi} Step 2: GET /percorso/{percorso_id} ...")
+                r2 = requests.get(f"{API_BASE}/percorso/{percorso_id}", timeout=30)
+                if r2.status_code != 200:
+                    log(f"[ROUTE API] MMSI={mmsi} Step 2 FALLITO: HTTP {r2.status_code}")
+                    return None
+
+                percorso_detail = r2.json()
+                geom_rotta = percorso_detail.get("geom_rotta")
+
+            if not geom_rotta:
+                log(f"[ROUTE API] MMSI={mmsi} geom_rotta assente o vuota")
+                return None
+
+            # Step 3: Estrai ultimo punto
+            dest = extract_destination_coords_from_geom(geom_rotta)
+            if dest is None:
+                log(f"[ROUTE API] MMSI={mmsi} impossibile estrarre coordinate da geom_rotta")
+                return None
+
+            log(f"[ROUTE API] MMSI={mmsi} OK: destinazione=({dest[0]:.4f}, {dest[1]:.4f})")
+            return (dest[0], dest[1], str(percorso_id), str(assegnazione_id))
+
+        except Exception as e:
+            log(f"[API] Errore recupero info rotta per MMSI={mmsi}: {e}")
             return None
 
-        # Step 3: Estrai ultimo punto
-        dest = extract_destination_coords_from_geom(geom_rotta)
-        if dest is None:
-            return None
-
-        return (dest[0], dest[1], str(percorso_id), str(assegnazione_id))
-
-    except Exception as e:
-        log(f"[API] Errore recupero info rotta per MMSI={mmsi}: {e}")
-        return None
+    return await asyncio.to_thread(_blocking_get_route_info)
 
 
-def mark_assegnazione_completata(assegnazione_id: str, mmsi: str) -> bool:
+async def mark_assegnazione_completata(assegnazione_id: str, mmsi: str) -> bool:
     """
     Aggiorna lo stato dell'assegnazione a COMPLETATA tramite API backend.
 
-    Effettua una chiamata:
+    Effettua una chiamata non bloccante:
     ``PATCH /assegnazione/{assegnazione_id}/stato``
     con body ``{"stato_esecuzione": "COMPLETATA"}``
 
@@ -533,24 +614,27 @@ def mark_assegnazione_completata(assegnazione_id: str, mmsi: str) -> bool:
     bool
         True se la chiamata è andata a buon fine, False altrimenti
     """
-    try:
-        url = f"{API_BASE}/assegnazione/{assegnazione_id}/stato"
-        payload = {"stato_esecuzione": "COMPLETATA"}
+    def _blocking_patch() -> bool:
+        try:
+            url = f"{API_BASE}/assegnazione/{assegnazione_id}/stato"
+            payload = {"stato_esecuzione": "COMPLETATA"}
 
-        r = requests.patch(url, json=payload, timeout=30)
+            r = requests.patch(url, json=payload, timeout=30)
 
-        if r.status_code in (200, 201, 204):
-            log(f"[API] ✓ Assegnazione {assegnazione_id} marcata COMPLETATA "
-                f"(MMSI={mmsi}, HTTP {r.status_code})")
-            return True
-        else:
-            log(f"[API] ✗ Errore aggiornamento assegnazione {assegnazione_id}: "
-                f"HTTP {r.status_code} - {r.text}")
+            if r.status_code in (200, 201, 204):
+                log(f"[API] ✓ Assegnazione {assegnazione_id} marcata COMPLETATA "
+                    f"(MMSI={mmsi}, HTTP {r.status_code})")
+                return True
+            else:
+                log(f"[API] ✗ Errore aggiornamento assegnazione {assegnazione_id}: "
+                    f"HTTP {r.status_code} - {r.text}")
+                return False
+
+        except Exception as e:
+            log(f"[API] ✗ Errore chiamata PATCH assegnazione {assegnazione_id}: {e}")
             return False
 
-    except Exception as e:
-        log(f"[API] ✗ Errore chiamata PUT assegnazione {assegnazione_id}: {e}")
-        return False
+    return await asyncio.to_thread(_blocking_patch)
 
 
 # =============================================================================
@@ -604,6 +688,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
     raw = normalize_nmea(msg.body)
     if not raw or not raw.startswith("!"):
+        log(f"[ARRIVO SKIP] source={source} motivo=nmea_non_valido body_type={type(msg.body).__name__}")
         await msg.ack()
         return
 
@@ -622,6 +707,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             final = None
 
     if not final:
+        log(f"[ARRIVO SKIP] source={source} motivo=multipart_incompleto")
         await msg.ack()
         return
 
@@ -658,6 +744,8 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
         should_mark_completed = False
         assegnazione_id_to_complete = None
 
+        # --- Prima passata sotto lock: aggiorna stato nave e leggi cache ---
+        need_route_fetch = False
         async with state_lock:
             # Inizializza o aggiorna stato nave
             ship = ships.setdefault(key, {
@@ -697,28 +785,48 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             if destination:
                 ship["destination"] = destination
 
-            # ---- LOGICA GEOFENCING ----
-
             # Se non abbiamo posizione, non possiamo verificare arrivo
             if ship["lat"] is None or ship["lon"] is None:
+                log(f"[ARRIVO] MMSI={mmsi} skip: nessuna posizione nota")
                 await msg.ack()
                 return
 
-            # Recupera/aggiorna coordinate destinazione e assegnazione_id (con cache)
+            # Controlla se serve aggiornare la cache rotta
             if ship["dest_lat"] is None or (now - ship["route_cache_ts"] > ROUTE_CACHE_TTL_SEC):
-                route_info = get_route_info(mmsi, is_simulation)
-                if route_info:
-                    ship["dest_lat"] = route_info[0]
-                    ship["dest_lon"] = route_info[1]
-                    ship["percorso_id"] = route_info[2]
-                    ship["assegnazione_id"] = route_info[3]
-                    ship["route_cache_ts"] = now
-                    log(f"[ROUTE] MMSI={mmsi} destinazione cached: "
-                        f"({route_info[0]:.4f}, {route_info[1]:.4f}) "
-                        f"assegnazione={route_info[3]}")
+                need_route_fetch = True
+
+        # --- Fetch rotta FUORI dal lock (non blocca altri messaggi) ---
+        if need_route_fetch:
+            route_info = await get_route_info(mmsi, is_simulation)
+            if route_info:
+                async with state_lock:
+                    if key in ships:
+                        ships[key]["dest_lat"] = route_info[0]
+                        ships[key]["dest_lon"] = route_info[1]
+                        ships[key]["percorso_id"] = route_info[2]
+                        ships[key]["assegnazione_id"] = route_info[3]
+                        ships[key]["route_cache_ts"] = now
+                log(f"[ROUTE] MMSI={mmsi} destinazione cached: "
+                    f"({route_info[0]:.4f}, {route_info[1]:.4f}) "
+                    f"assegnazione={route_info[3]}")
+            else:
+                # Negative cache: evita di richiamare l'API ogni messaggio (~17s ciascuna)
+                # Riprova dopo 60s invece che ad ogni messaggio
+                async with state_lock:
+                    if key in ships:
+                        ships[key]["route_cache_ts"] = now - ROUTE_CACHE_TTL_SEC + 60
+                log(f"[ROUTE] MMSI={mmsi} route_info=None, riprovo tra 60s")
+
+        # --- Seconda passata sotto lock: geofencing e macchina a stati ---
+        async with state_lock:
+            ship = ships.get(key)
+            if not ship:
+                await msg.ack()
+                return
 
             # Se non abbiamo coordinate destinazione, skip
             if ship["dest_lat"] is None or ship["dest_lon"] is None:
+                log(f"[ARRIVO] MMSI={mmsi} skip: coordinate destinazione non disponibili")
                 await msg.ack()
                 return
 
@@ -729,6 +837,9 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
             )
 
             in_geofence = distance <= GEOFENCE_RADIUS_M
+            log(f"[ARRIVO] MMSI={mmsi} pos=({ship['lat']:.4f},{ship['lon']:.4f}) "
+                f"dest=({ship['dest_lat']:.4f},{ship['dest_lon']:.4f}) "
+                f"dist={distance:.0f}m geofence={in_geofence} stato={ship['arrival_state']}")
 
             # ---- MACCHINA A STATI ----
             prev_state = ship["arrival_state"]
@@ -771,7 +882,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
         # ---- CHIAMATA API BACKEND (fuori dal lock) ----
         if should_mark_completed and assegnazione_id_to_complete:
-            success = mark_assegnazione_completata(assegnazione_id_to_complete, mmsi)
+            success = await mark_assegnazione_completata(assegnazione_id_to_complete, mmsi)
             if success:
                 async with state_lock:
                     if key in ships:
@@ -781,7 +892,7 @@ async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simula
 
     except Exception as e:
         log(f"[ERROR] Errore processing AIS: {e}")
-        await msg.nack()
+        await msg.ack()
 
 
 # =============================================================================

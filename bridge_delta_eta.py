@@ -532,7 +532,8 @@ async def _fetch_active_percorsi(mmsi: str) -> Optional[list]:
             return r.json().get("percorsi", [])
 
         result = await asyncio.to_thread(_request)
-        _percorsi_cache[mmsi] = (now, result)
+        if result is not None:
+            _percorsi_cache[mmsi] = (now, result)
         return result
     except Exception:
         return None
@@ -570,7 +571,7 @@ async def get_expected_eta_from_api(mmsi: str) -> Optional[float]:
         # Cerca il percorso reale (virtuale=false)
         percorso = None
         for p in percorsi:
-            if p.get("assegnazione", {}).get("virtuale") is False:
+            if p.get("assegnazione", {}).get("virtuale") == False:
                 percorso = p.get("percorso")
                 break
 
@@ -620,7 +621,7 @@ async def get_simulation_expected_eta(mmsi: str, start_ts: float) -> Optional[fl
         # Cerca il percorso simulato (virtuale=true)
         percorso = None
         for p in percorsi:
-            if p.get("assegnazione", {}).get("virtuale") is True:
+            if p.get("assegnazione", {}).get("virtuale") == True:
                 percorso = p.get("percorso")
                 break
 
@@ -681,13 +682,17 @@ async def cleanup_inactive_ships() -> None:
         for key in list(ships_db.keys()):
             ship = ships_db[key]
             last_seen = ship.get("last_seen")
-            tempo_percorrenza = ship.get("tempo_percorrenza")
 
-            if last_seen is None or tempo_percorrenza is None:
+            if last_seen is None:
                 continue
 
-            # Timeout = 1/10 del tempo di percorrenza (in secondi)
-            timeout_sec = (tempo_percorrenza * 60) / 10
+            tempo_percorrenza = ship.get("tempo_percorrenza")
+            if tempo_percorrenza is not None:
+                # Timeout = 1/10 del tempo di percorrenza (in secondi)
+                timeout_sec = (tempo_percorrenza * 60) / 10
+            else:
+                # Fallback per navi senza tempo_percorrenza (solo tipo 1-3 ricevuti)
+                timeout_sec = 3600  # 1 ora
 
             if now - last_seen > timeout_sec:
                 mmsi = ship.get("mmsi", "?")
@@ -776,20 +781,25 @@ async def process_ais_message(
 
         # Estrai ETA dal messaggio AIS
         eta = calculate_eta_timestamp(data)
-        print(f"[DELTA ETA] MMSI={mmsi} ETA={eta} SOURCE={source} TOPIC={topic}")
-        if eta is None:
-            print(f"[DELTA ETA SKIP] MMSI={mmsi} source={source} motivo=eta_non_presente_o_non_valida")
-            await msg.ack()
-            return
-        print(f"[DELTA ETA] {data}")
 
         key: ShipKey = (topic, mmsi)
+
+        # Messaggi senza ETA (tipo 1-3): aggiorna solo last_seen, nessuna chiamata API
+        if eta is None:
+            async with state_lock:
+                ship = ships_db.setdefault(key, {"mmsi": mmsi, "topic": topic})
+                ship["last_seen"] = time.time()
+            await msg.ack()
+            return
+
+        print(f"[DELTA ETA] MMSI={mmsi} ETA={eta} SOURCE={source} TOPIC={topic}")
+        print(f"[DELTA ETA] {data}")
 
         # Variabili da usare fuori dal lock
         destination_norm = "UNKNOWN"
         expected_eta: Optional[float] = None
 
-        # Recupero tempo_percorrenza dall'API per il cleanup (non bloccante)
+        # Recupero tempo_percorrenza dall'API (solo per messaggi con ETA, tipo 5)
         tempo_percorrenza: Optional[float] = None
         percorsi: Optional[list] = None
         try:
@@ -797,7 +807,7 @@ async def process_ais_message(
             if percorsi:
                 virtuale_target = (source == "simulation")
                 for p in percorsi:
-                    if p.get("assegnazione", {}).get("virtuale") is virtuale_target:
+                    if p.get("assegnazione", {}).get("virtuale") == virtuale_target:
                         tempo_percorrenza = p.get("percorso", {}).get("tempo_percorrenza")
                         break
         except Exception:
@@ -810,7 +820,7 @@ async def process_ais_message(
             # Calcola da percorsi già recuperati per evitare una seconda chiamata HTTP
             if percorsi:
                 for p in percorsi:
-                    if p.get("assegnazione", {}).get("virtuale") is False:
+                    if p.get("assegnazione", {}).get("virtuale") == False:
                         _perc = p.get("percorso")
                         if _perc:
                             _partenza = _perc.get("orario_partenza_schedulato")
