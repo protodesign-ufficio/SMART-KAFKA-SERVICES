@@ -118,14 +118,11 @@ OUTPUT_TOPIC = "analytics_ais.raw"
 API_BASE = os.getenv("API_BASE", "http://87.26.178.190:25080")
 """str: URL base dell'API backend"""
 
-COMPONENT_API_TIMEOUT_SEC = float(os.getenv("COMPONENT_API_TIMEOUT_SEC", "10"))
+COMPONENT_API_TIMEOUT_SEC = float(os.getenv("COMPONENT_API_TIMEOUT_SEC", "3"))
 """float: Timeout HTTP per il recupero componenti dal backend"""
 
 EMPTY_COMPONENTS_RETRY_SEC = float(os.getenv("EMPTY_COMPONENTS_RETRY_SEC", "60"))
 """float: Intervallo di retry per MMSI con lista componenti vuota"""
-
-COMPONENT_CACHE_TTL_SEC = float(os.getenv("COMPONENT_CACHE_TTL_SEC", "300"))
-"""float: TTL cache componenti (5 min) — forza re-fetch periodico dal DB"""
 
 
 # =============================================================================
@@ -321,9 +318,9 @@ def fetch_components_for_mmsi(mmsi: str) -> list[str]:
 
 async def get_components_for_mmsi(mmsi: str) -> list[str]:
     """
-    Restituisce i componenti per MMSI usando cache in-memory con TTL.
+    Restituisce i componenti per MMSI usando cache in-memory.
 
-    Se la cache è assente o scaduta (COMPONENT_CACHE_TTL_SEC), fa fetch immediato.
+    Se la cache è assente fa fetch immediato.
     Se la cache esiste ma è vuota, ritenta dopo EMPTY_COMPONENTS_RETRY_SEC.
     """
     now = time.time()
@@ -331,10 +328,7 @@ async def get_components_for_mmsi(mmsi: str) -> list[str]:
         cached = component_cache.get(mmsi)
 
         if cached and cached.get("components"):
-            age = now - float(cached.get("fetched_at", 0.0))
-            if age < COMPONENT_CACHE_TTL_SEC:
-                return list(cached["components"])
-            # TTL scaduto: ri-fetch anche se non vuoto
+            return list(cached["components"])
 
         should_retry_empty = bool(
             cached
@@ -342,11 +336,10 @@ async def get_components_for_mmsi(mmsi: str) -> list[str]:
             and (now - float(cached.get("fetched_at", 0.0)) >= EMPTY_COMPONENTS_RETRY_SEC)
         )
 
-        if cached and not cached.get("components") and not should_retry_empty:
+        if cached and not should_retry_empty:
             return []
 
     components = await asyncio.to_thread(fetch_components_for_mmsi, mmsi)
-    print(f"[COMP FETCH] mmsi={mmsi} → {len(components)} components: {components[:3]}...", flush=True)
 
     async with state_lock:
         component_cache[mmsi] = {
@@ -429,15 +422,9 @@ def normalize_nmea(raw_value) -> Optional[str]:
     """
     Normalizza un messaggio NMEA grezzo in formato standard AIVDM.
     
-    Gestisce diversi formati di input:
-    - dict (da FastStream auto-deserializzazione JSON, es. simulazione)
-    - Bytes UTF-8
-    - Stringhe con wrapper JSON (es. da Kafka Connect)
-    - Messaggi AIVDM diretti
-    
     Parameters
     ----------
-    raw_value : dict | bytes | str
+    raw_value : bytes | str
         Messaggio grezzo
     
     Returns
@@ -446,35 +433,15 @@ def normalize_nmea(raw_value) -> Optional[str]:
         Messaggio normalizzato o None se parsing fallisce
     """
     try:
-        # Gestione input dict (tipico da ais_simulation.raw deserializzato da FastStream)
-        if isinstance(raw_value, dict):
-            fields = raw_value.get("fields")
-            if isinstance(fields, dict):
-                v = fields.get("value")
-                if isinstance(v, str):
-                    raw_value = v
-            if isinstance(raw_value, dict):
-                v = raw_value.get("value")
-                if isinstance(v, str):
-                    raw_value = v
-
         if isinstance(raw_value, bytes):
             raw_value = raw_value.decode("utf-8", errors="ignore")
-
-        if not isinstance(raw_value, str):
-            return None
 
         raw_value = raw_value.strip()
 
         if raw_value.startswith("{"):
-            try:
-                data = json.loads(raw_value)
-                if "fields" in data and "value" in data["fields"]:
-                    return data["fields"]["value"]
-                if "value" in data and isinstance(data["value"], str):
-                    return data["value"]
-            except Exception:
-                pass
+            data = json.loads(raw_value)
+            if "fields" in data and "value" in data["fields"]:
+                return data["fields"]["value"]
 
         if raw_value.startswith("!AIVDM"):
             return raw_value
@@ -491,22 +458,21 @@ def normalize_nmea(raw_value) -> Optional[str]:
 # CORE PROCESSOR - Elaborazione Messaggi AIS
 # =============================================================================
 
-async def process_ais_message(topic: str, raw_bytes) -> None:
+async def process_ais_message(topic: str, raw_bytes: bytes) -> None:
     """
     Processa un messaggio AIS e aggiorna lo stato dei componenti.
     
     Pipeline di elaborazione:
     1. Normalizzazione NMEA
-    2. Skip multipart (Type 5 etc.) — serve solo speed da Type 1-3
-    3. Decodifica AIS con pyais
-    4. Estrazione velocità (SOG)
-    5. Aggiornamento stato componenti
+    2. Decodifica AIS con pyais
+    3. Estrazione velocità (SOG)
+    4. Aggiornamento stato componenti
     
     Parameters
     ----------
     topic : str
         Topic Kafka sorgente (usato come parte della chiave stato)
-    raw_bytes : bytes | dict | str
+    raw_bytes : bytes
         Messaggio AIS grezzo
     
     Notes
@@ -520,25 +486,8 @@ async def process_ais_message(topic: str, raw_bytes) -> None:
     if not raw:
         return
 
-    # Skip multipart bundled (Type 5 etc.) — bridge_components usa solo speed (Type 1-3)
-    lines = [l.strip() for l in raw.split("\n") if l.strip().startswith("!AIVDM")]
-    if len(lines) > 1:
-        return
-
-    # Skip singoli frammenti multipart
-    parts = raw.split(",")
-    if len(parts) > 5:
-        try:
-            if int(parts[1]) > 1:
-                return
-        except Exception:
-            pass
-
-    try:
-        decoded = ais_decode(raw)
-        data = decoded.asdict()
-    except Exception:
-        return
+    decoded = ais_decode(raw)
+    data = decoded.asdict()
 
     # Richiede il campo speed per il tracking componenti
     if "speed" not in data:
@@ -558,7 +507,6 @@ async def process_ais_message(topic: str, raw_bytes) -> None:
     key: ShipKey = (topic, mmsi)
 
     async with state_lock:
-        is_new = key not in ships
         # Inizializza nave se non esiste
         ship = ships.setdefault(
             key,
@@ -570,18 +518,6 @@ async def process_ais_message(topic: str, raw_bytes) -> None:
                 "mmsi": mmsi,
             },
         )
-
-        if is_new:
-            print(f"[SHIP INIT] mmsi={mmsi} topic={topic} components={len(components)}: {components[:5]}...", flush=True)
-        else:
-            # Aggiunge componenti mancanti senza azzerare i contatori esistenti
-            added = []
-            for c in components:
-                if c not in ship["components"]:
-                    ship["components"][c] = {"usage_total": 0.0, "active": False}
-                    added.append(c)
-            if added:
-                print(f"[SHIP UPDATE] mmsi={mmsi} added {len(added)} new components: {added[:5]}", flush=True)
 
         # Aggiorna stato AIS e componenti
         ship["ais"] = data

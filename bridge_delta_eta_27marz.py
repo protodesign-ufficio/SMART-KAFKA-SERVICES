@@ -747,33 +747,25 @@ async def process_ais_message(
 
     topic = topic_override or getattr(msg, "topic", MAIN_TOPIC)
 
-    # Gestione messaggi multi-riga (frammenti bundled in un unico messaggio Kafka)
-    lines = [l.strip() for l in raw.split("\n") if l.strip().startswith("!AIVDM")]
-    if len(lines) > 1:
-        # Tutti i frammenti sono già presenti: decodifica nativa pyais multipart
-        decode_args = tuple(lines)
-    else:
-        # Singola riga NMEA: gestione standard
-        parts = raw.split(",")
-        final = raw
+    parts = raw.split(",")
+    final = raw
 
-        # Gestione messaggi multipart (frammenti singoli in messaggi separati)
-        if len(parts) > 5:
-            try:
-                total = int(parts[1])
-                if total > 1:
-                    final = handle_multipart(topic, parts)
-            except Exception:
-                final = None
+    # Gestione messaggi multipart
+    if len(parts) > 5:
+        try:
+            total = int(parts[1])
+            if total > 1:
+                final = handle_multipart(topic, parts)
+        except Exception:
+            final = None
 
-        if not final:
-            print(f"[DELTA ETA SKIP] source={source} topic={topic} motivo=multipart_incompleto")
-            await msg.ack()
-            return
-        decode_args = (final,)
+    if not final:
+        print(f"[DELTA ETA SKIP] source={source} topic={topic} motivo=multipart_incompleto")
+        await msg.ack()
+        return
 
     try:
-        decoded = ais_decode(*decode_args)
+        decoded = ais_decode(final)
         data = decoded.asdict() if hasattr(decoded, "asdict") else dict(decoded)
 
         mmsi = str(data.get("mmsi") or "")

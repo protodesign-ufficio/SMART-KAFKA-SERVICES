@@ -141,16 +141,13 @@ GEOFENCE_RADIUS_M: float = float(os.getenv("GEOFENCE_RADIUS_M", "500"))
 """float: Raggio del geofence di destinazione in metri (default: 500m)"""
 
 ARRIVAL_CONFIRM_COUNT: int = int(os.getenv("ARRIVAL_CONFIRM_COUNT", "3"))
-"""int: Numero di check periodici consecutivi in geofence per confermare l'arrivo"""
+"""int: Numero di messaggi consecutivi in geofence + bassa velocità per confermare l'arrivo"""
 
 ROUTE_CACHE_TTL_SEC: float = float(os.getenv("ROUTE_CACHE_TTL_SEC", "600"))
 """float: Tempo di vita della cache rotte in secondi (default: 10 minuti)"""
 
-SHIP_INACTIVE_TIMEOUT_SEC: float = float(os.getenv("SHIP_INACTIVE_TIMEOUT_SEC", "300"))
-"""float: Timeout in secondi per rimuovere navi inattive dalla memoria (default: 5 minuti)"""
-
-GEOFENCE_CHECK_INTERVAL_SEC: float = float(os.getenv("GEOFENCE_CHECK_INTERVAL_SEC", "5"))
-"""float: Intervallo in secondi tra i check di geofencing (default: 5s)"""
+SHIP_INACTIVE_TIMEOUT_SEC: float = float(os.getenv("SHIP_INACTIVE_TIMEOUT_SEC", "3600"))
+"""float: Timeout in secondi per rimuovere navi inattive dalla memoria (default: 1 ora)"""
 
 
 # =============================================================================
@@ -187,7 +184,6 @@ Struttura valore:
     "speed": float,                 # Ultima velocità SOG (nodi) [informativo]
     "status": int,                  # Stato navigazione AIS [informativo]
     "destination": str,             # Destinazione AIS dichiarata
-    "is_simulation": bool,          # True per navi simulate
     "last_seen": float,             # Timestamp ultimo messaggio
     "arrival_state": str,           # "navigating" | "arriving" | "arrived"
     "confirm_count": int,           # Contatore conferme arrivo consecutive
@@ -200,12 +196,6 @@ Struttura valore:
 }
 """
 
-# Buffer leggero per posizioni: scritto dal subscriber (senza lock), letto dal task periodico.
-# Struttura: {ShipKey: {"lat": float, "lon": float, "speed": float, "status": int,
-#              "destination": str|None, "is_simulation": bool, "mmsi": str, "topic": str, "ts": float}}
-_latest_positions: Dict[ShipKey, dict] = {}
-"""Buffer lock-free per le ultime posizioni ricevute dai subscriber."""
-
 multipart_buffer: Dict[tuple, List] = {}
 """Buffer multipart a coda per ricomposizione frammenti AIS multipart.
 Indicizzato per (topic, canale, total_frammenti)."""
@@ -215,9 +205,6 @@ last_cleanup = time.time()
 
 MULTIPART_TTL_SEC = 120
 """float: TTL dei frammenti multipart nel buffer (secondi)."""
-
-_route_fetch_in_progress: Dict[ShipKey, bool] = {}
-"""Tracking delle fetch rotta in corso per evitare richieste duplicate."""
 
 
 # =============================================================================
@@ -650,18 +637,6 @@ async def mark_assegnazione_completata(assegnazione_id: str, mmsi: str) -> bool:
     return await asyncio.to_thread(_blocking_patch)
 
 
-async def _background_mark_completed(key: ShipKey, assegnazione_id: str, mmsi: str) -> None:
-    """Marca l'assegnazione come completata in background senza bloccare il flusso messaggi."""
-    try:
-        success = await mark_assegnazione_completata(assegnazione_id, mmsi)
-        if success:
-            async with state_lock:
-                if key in ships:
-                    ships[key]["arrival_completed"] = True
-    except Exception as e:
-        log(f"[MARK COMPLETED BG ERROR] MMSI={mmsi}: {e}")
-
-
 # =============================================================================
 # CLEANUP
 # =============================================================================
@@ -671,13 +646,9 @@ async def cleanup_inactive_ships() -> None:
     Rimuove dalla memoria le navi inattive.
 
     Una nave viene rimossa quando non riceve dati per un tempo
-    superiore a SHIP_INACTIVE_TIMEOUT_SEC (default: 5 minuti).
-    Prima della rimozione, se la nave ha un'assegnazione IN_CORSO
-    non ancora completata, la marca come COMPLETATA.
+    superiore a SHIP_INACTIVE_TIMEOUT_SEC (default: 1 ora).
     """
     now = time.time()
-    to_complete: list = []  # raccolti sotto lock, eseguiti fuori
-
     async with state_lock:
         for key in list(ships.keys()):
             ship = ships[key]
@@ -685,61 +656,26 @@ async def cleanup_inactive_ships() -> None:
 
             if now - last_seen > SHIP_INACTIVE_TIMEOUT_SEC:
                 mmsi = ship.get("mmsi", "?")
-                aid = ship.get("assegnazione_id")
-                completed = ship.get("arrival_completed", False)
-
-                if aid and not completed:
-                    to_complete.append((key, aid, mmsi))
-                    log(f"[CLEANUP] MMSI={mmsi} inattiva con assegnazione {aid} non completata, marco COMPLETATA")
-
                 log(f"[CLEANUP] Rimozione nave MMSI={mmsi} (inattiva per >{SHIP_INACTIVE_TIMEOUT_SEC:.0f}s)")
                 del ships[key]
-
-    # Fuori dal lock: chiama API per marcare le assegnazioni come COMPLETATA
-    for key, aid, mmsi in to_complete:
-        await mark_assegnazione_completata(aid, mmsi)
 
 
 # =============================================================================
 # CORE PROCESSOR - Elaborazione Messaggi AIS
 # =============================================================================
 
-async def _background_route_fetch(key: ShipKey, mmsi: str, is_simulation: bool) -> None:
+async def process_ais_message(msg: KafkaMessage, source: Literal["real", "simulation"]) -> None:
     """
-    Fetch rotta in background. Aggiorna la cache senza bloccare il flusso messaggi.
-    """
-    try:
-        route_info = await get_route_info(mmsi, is_simulation)
-        now = time.time()
-        async with state_lock:
-            if key in ships:
-                if route_info:
-                    ships[key]["dest_lat"] = route_info[0]
-                    ships[key]["dest_lon"] = route_info[1]
-                    ships[key]["percorso_id"] = route_info[2]
-                    ships[key]["assegnazione_id"] = route_info[3]
-                    ships[key]["route_cache_ts"] = now
-                    log(f"[ROUTE BG] MMSI={mmsi} destinazione cached: "
-                        f"({route_info[0]:.4f}, {route_info[1]:.4f}) "
-                        f"assegnazione={route_info[3]}")
-                else:
-                    # Negative cache: riprova tra 60s
-                    ships[key]["route_cache_ts"] = now - ROUTE_CACHE_TTL_SEC + 60
-                    log(f"[ROUTE BG] MMSI={mmsi} route_info=None, riprovo tra 60s")
-    except Exception as e:
-        log(f"[ROUTE BG ERROR] MMSI={mmsi}: {e}")
-    finally:
-        _route_fetch_in_progress.pop(key, None)
+    Processa un messaggio AIS e verifica l'arrivo a destinazione.
 
-
-async def _store_position(msg: KafkaMessage, source: Literal["real", "simulation"]) -> None:
-    """
-    Subscriber ultra-leggero: decodifica NMEA, salva ultima posizione, ack immediato.
-
-    NON esegue geofencing, route fetch, o acquisisce lock.
-    Tutto il processing pesante è delegato al task periodico ``geofence_check_loop()``.
-    Questo disaccoppia completamente la velocità di consumo messaggi dalla
-    latenza del geofencing, eliminando l'accumulo di ritardo.
+    Pipeline di elaborazione:
+    1. Pulizia buffer e navi inattive
+    2. Normalizzazione e decodifica NMEA
+    3. Estrazione posizione (lat/lon), velocità (SOG), stato navigazione
+    4. Recupero coordinate destinazione e assegnazione_id (da cache o API)
+    5. Calcolo distanza (haversine) dalla destinazione
+    6. Logica di stato: navigating → arriving → arrived
+    7. All'arrivo: PATCH /assegnazione/{assegnazione_id}/stato → COMPLETATA
 
     Parameters
     ----------
@@ -748,62 +684,215 @@ async def _store_position(msg: KafkaMessage, source: Literal["real", "simulation
     source : Literal["real", "simulation"]
         Tipo sorgente per distinguere navi reali e simulate
     """
+    cleanup_multipart_buffer()
+
     raw = normalize_nmea(msg.body)
     if not raw or not raw.startswith("!"):
+        log(f"[ARRIVO SKIP] source={source} motivo=nmea_non_valido body_type={type(msg.body).__name__}")
         await msg.ack()
         return
 
     topic = getattr(msg, "topic", MAIN_TOPIC)
 
-    # Skip multipart (Type 5 etc.) — bridge_arrivo usa solo posizioni (Type 1-3)
     parts = raw.split(",")
+    final = raw
+
+    # Gestione messaggi multipart
     if len(parts) > 5:
         try:
-            if int(parts[1]) > 1:
-                await msg.ack()
-                return
+            total = int(parts[1])
+            if total > 1:
+                final = handle_multipart(topic, parts)
         except Exception:
-            pass
+            final = None
+
+    if not final:
+        log(f"[ARRIVO SKIP] source={source} motivo=multipart_incompleto")
+        await msg.ack()
+        return
 
     try:
-        decoded = ais_decode(raw)
+        decoded = ais_decode(final)
         data = decoded.asdict() if hasattr(decoded, "asdict") else dict(decoded)
 
         mmsi = str(data.get("mmsi") or "")
-        if not mmsi or mmsi.startswith("50"):
+        if not mmsi:
             await msg.ack()
             return
 
+        # Ignora messaggi "ghost" (MMSI che inizia con 50)
+        if mmsi.startswith("50"):
+            await msg.ack()
+            return
+
+        # Estrai posizione - richiede lat e lon (msg tipo 1-3)
         lat = data.get("lat")
         lon = data.get("lon")
-        if lat is None or lon is None:
-            await msg.ack()
-            return
+        speed = data.get("speed")
+        nav_status = data.get("status")
 
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-            await msg.ack()
-            return
+        # Estrai destinazione (msg tipo 5)
+        destination = data.get("destination")
+        if destination and isinstance(destination, str):
+            destination = " ".join(destination.strip().upper().split()) or None
 
         is_simulation = (source == "simulation")
         key: ShipKey = (topic, mmsi)
+        now = time.time()
 
-        # Scrittura nel buffer lock-free (dict assignment è atomico in CPython)
-        _latest_positions[key] = {
-            "mmsi": mmsi,
-            "topic": topic,
-            "lat": lat,
-            "lon": lon,
-            "speed": data.get("speed"),
-            "status": data.get("status"),
-            "destination": data.get("destination"),
-            "is_simulation": is_simulation,
-            "ts": time.time(),
-        }
+        # Variabili per decisioni fuori dal lock
+        should_mark_completed = False
+        assegnazione_id_to_complete = None
 
-    except Exception:
-        pass
+        # --- Prima passata sotto lock: aggiorna stato nave e leggi cache ---
+        need_route_fetch = False
+        async with state_lock:
+            # Inizializza o aggiorna stato nave
+            ship = ships.setdefault(key, {
+                "mmsi": mmsi,
+                "topic": topic,
+                "lat": None,
+                "lon": None,
+                "speed": None,
+                "status": None,
+                "destination": None,
+                "last_seen": now,
+                "arrival_state": "navigating",  # navigating | arriving | arrived
+                "confirm_count": 0,
+                "dest_lat": None,
+                "dest_lon": None,
+                "route_cache_ts": 0,
+                "percorso_id": None,
+                "assegnazione_id": None,
+                "arrival_completed": False,
+            })
 
-    await msg.ack()
+            ship["last_seen"] = now
+
+            # Aggiorna posizione se disponibile
+            if lat is not None and lon is not None:
+                # Filtra coordinate invalide (0,0 o fuori range)
+                if -90 <= lat <= 90 and -180 <= lon <= 180 and not (lat == 0 and lon == 0):
+                    ship["lat"] = lat
+                    ship["lon"] = lon
+
+            if speed is not None:
+                ship["speed"] = speed
+
+            if nav_status is not None:
+                ship["status"] = nav_status
+
+            if destination:
+                ship["destination"] = destination
+
+            # Se non abbiamo posizione, non possiamo verificare arrivo
+            if ship["lat"] is None or ship["lon"] is None:
+                log(f"[ARRIVO] MMSI={mmsi} skip: nessuna posizione nota")
+                await msg.ack()
+                return
+
+            # Controlla se serve aggiornare la cache rotta
+            if ship["dest_lat"] is None or (now - ship["route_cache_ts"] > ROUTE_CACHE_TTL_SEC):
+                need_route_fetch = True
+
+        # --- Fetch rotta FUORI dal lock (non blocca altri messaggi) ---
+        if need_route_fetch:
+            route_info = await get_route_info(mmsi, is_simulation)
+            if route_info:
+                async with state_lock:
+                    if key in ships:
+                        ships[key]["dest_lat"] = route_info[0]
+                        ships[key]["dest_lon"] = route_info[1]
+                        ships[key]["percorso_id"] = route_info[2]
+                        ships[key]["assegnazione_id"] = route_info[3]
+                        ships[key]["route_cache_ts"] = now
+                log(f"[ROUTE] MMSI={mmsi} destinazione cached: "
+                    f"({route_info[0]:.4f}, {route_info[1]:.4f}) "
+                    f"assegnazione={route_info[3]}")
+            else:
+                # Negative cache: evita di richiamare l'API ogni messaggio (~17s ciascuna)
+                # Riprova dopo 60s invece che ad ogni messaggio
+                async with state_lock:
+                    if key in ships:
+                        ships[key]["route_cache_ts"] = now - ROUTE_CACHE_TTL_SEC + 60
+                log(f"[ROUTE] MMSI={mmsi} route_info=None, riprovo tra 60s")
+
+        # --- Seconda passata sotto lock: geofencing e macchina a stati ---
+        async with state_lock:
+            ship = ships.get(key)
+            if not ship:
+                await msg.ack()
+                return
+
+            # Se non abbiamo coordinate destinazione, skip
+            if ship["dest_lat"] is None or ship["dest_lon"] is None:
+                log(f"[ARRIVO] MMSI={mmsi} skip: coordinate destinazione non disponibili")
+                await msg.ack()
+                return
+
+            # Calcola distanza dalla destinazione
+            distance = haversine_distance_m(
+                ship["lat"], ship["lon"],
+                ship["dest_lat"], ship["dest_lon"]
+            )
+
+            in_geofence = distance <= GEOFENCE_RADIUS_M
+            log(f"[ARRIVO] MMSI={mmsi} pos=({ship['lat']:.4f},{ship['lon']:.4f}) "
+                f"dest=({ship['dest_lat']:.4f},{ship['dest_lon']:.4f}) "
+                f"dist={distance:.0f}m geofence={in_geofence} stato={ship['arrival_state']}")
+
+            # ---- MACCHINA A STATI ----
+            prev_state = ship["arrival_state"]
+
+            if prev_state == "navigating":
+                if in_geofence:
+                    ship["confirm_count"] += 1
+                    if ship["confirm_count"] >= ARRIVAL_CONFIRM_COUNT:
+                        ship["arrival_state"] = "arrived"
+                        if not ship["arrival_completed"] and ship["assegnazione_id"]:
+                            should_mark_completed = True
+                            assegnazione_id_to_complete = ship["assegnazione_id"]
+                        log(f"[ARRIVED] MMSI={mmsi} dest={ship['destination']} "
+                            f"dist={distance:.0f}m "
+                            f"assegnazione={ship['assegnazione_id']}")
+                    else:
+                        ship["arrival_state"] = "arriving"
+                else:
+                    ship["confirm_count"] = 0
+
+            elif prev_state == "arriving":
+                if in_geofence:
+                    ship["confirm_count"] += 1
+                    if ship["confirm_count"] >= ARRIVAL_CONFIRM_COUNT:
+                        ship["arrival_state"] = "arrived"
+                        if not ship["arrival_completed"] and ship["assegnazione_id"]:
+                            should_mark_completed = True
+                            assegnazione_id_to_complete = ship["assegnazione_id"]
+                        log(f"[ARRIVED] MMSI={mmsi} dest={ship['destination']} "
+                            f"dist={distance:.0f}m "
+                            f"assegnazione={ship['assegnazione_id']}")
+                else:
+                    # Reset se condizioni non più soddisfatte
+                    ship["arrival_state"] = "navigating"
+                    ship["confirm_count"] = 0
+
+            elif prev_state == "arrived":
+                # Già arrivato, nessuna azione ulteriore
+                pass
+
+        # ---- CHIAMATA API BACKEND (fuori dal lock) ----
+        if should_mark_completed and assegnazione_id_to_complete:
+            success = await mark_assegnazione_completata(assegnazione_id_to_complete, mmsi)
+            if success:
+                async with state_lock:
+                    if key in ships:
+                        ships[key]["arrival_completed"] = True
+
+        await msg.ack()
+
+    except Exception as e:
+        log(f"[ERROR] Errore processing AIS: {e}")
+        await msg.ack()
 
 
 # =============================================================================
@@ -814,157 +903,31 @@ async def _store_position(msg: KafkaMessage, source: Literal["real", "simulation
 async def ais_consumer_real(msg: KafkaMessage):
     """
     Subscriber per il topic AIS principale (dati reali).
-    Ultra-leggero: salva posizione e ack immediato.
+
+    Parameters
+    ----------
+    msg : KafkaMessage
+        Messaggio Kafka contenente dati AIS reali
     """
-    await _store_position(msg, source="real")
+    await process_ais_message(msg, source="real")
 
 
 @broker.subscriber(SIM_TOPIC)
 async def ais_consumer_sim(msg: KafkaMessage):
     """
     Subscriber per il topic AIS simulazione.
-    Ultra-leggero: salva posizione e ack immediato.
+
+    Parameters
+    ----------
+    msg : KafkaMessage
+        Messaggio Kafka contenente dati AIS simulati
     """
-    await _store_position(msg, source="simulation")
+    await process_ais_message(msg, source="simulation")
 
 
 # =============================================================================
 # TASK PERIODICI
 # =============================================================================
-
-async def geofence_check_loop():
-    """
-    Task periodico che esegue il geofencing ogni GEOFENCE_CHECK_INTERVAL_SEC secondi.
-
-    Legge le ultime posizioni dal buffer ``_latest_positions`` (scritto dai
-    subscriber senza lock) e processa la macchina a stati di arrivo per ogni nave.
-
-    Questo disaccoppia completamente la velocità di consumo messaggi Kafka
-    dalla latenza del geofencing + route fetch, eliminando l'accumulo di ritardo
-    quando molte navi simulano contemporaneamente ad alta velocità.
-    """
-    while True:
-        await asyncio.sleep(GEOFENCE_CHECK_INTERVAL_SEC)
-
-        # Snapshot posizioni correnti
-        positions = dict(_latest_positions)
-        if not positions:
-            continue
-
-        now = time.time()
-
-        for key, pos in positions.items():
-            mmsi = pos["mmsi"]
-            is_simulation = pos["is_simulation"]
-
-            should_mark = False
-            aid = None
-
-            try:
-                async with state_lock:
-                    ship = ships.setdefault(key, {
-                        "mmsi": mmsi,
-                        "topic": pos["topic"],
-                        "lat": None,
-                        "lon": None,
-                        "speed": None,
-                        "status": None,
-                        "destination": None,
-                        "is_simulation": is_simulation,
-                        "last_seen": now,
-                        "arrival_state": "navigating",
-                        "confirm_count": 0,
-                        "dest_lat": None,
-                        "dest_lon": None,
-                        "route_cache_ts": 0,
-                        "percorso_id": None,
-                        "assegnazione_id": None,
-                        "arrival_completed": False,
-                    })
-
-                    # Aggiorna posizione e metadati
-                    ship["lat"] = pos["lat"]
-                    ship["lon"] = pos["lon"]
-                    ship["last_seen"] = pos["ts"]
-
-                    if pos["speed"] is not None:
-                        ship["speed"] = pos["speed"]
-                    if pos["status"] is not None:
-                        ship["status"] = pos["status"]
-
-                    dest_str = pos.get("destination")
-                    if dest_str and isinstance(dest_str, str):
-                        cleaned = " ".join(dest_str.strip().upper().split()) or None
-                        if cleaned:
-                            ship["destination"] = cleaned
-
-                    # Check cache rotta → fetch in background se scaduta
-                    need_route_fetch = (
-                        ship["dest_lat"] is None
-                        or (now - ship["route_cache_ts"] > ROUTE_CACHE_TTL_SEC)
-                    )
-                    if need_route_fetch and not _route_fetch_in_progress.get(key):
-                        _route_fetch_in_progress[key] = True
-                        asyncio.create_task(_background_route_fetch(key, mmsi, is_simulation))
-
-                    # Skip geofencing se non abbiamo coordinate destinazione
-                    if ship["dest_lat"] is None or ship["dest_lon"] is None:
-                        continue
-
-                    # Calcola distanza dalla destinazione
-                    distance = haversine_distance_m(
-                        ship["lat"], ship["lon"],
-                        ship["dest_lat"], ship["dest_lon"]
-                    )
-
-                    in_geofence = distance <= GEOFENCE_RADIUS_M
-                    log(f"[ARRIVO] MMSI={mmsi} pos=({ship['lat']:.4f},{ship['lon']:.4f}) "
-                        f"dest=({ship['dest_lat']:.4f},{ship['dest_lon']:.4f}) "
-                        f"dist={distance:.0f}m geofence={in_geofence} "
-                        f"stato={ship['arrival_state']}")
-
-                    # ---- MACCHINA A STATI ----
-                    prev_state = ship["arrival_state"]
-
-                    if prev_state == "navigating":
-                        if in_geofence:
-                            ship["confirm_count"] += 1
-                            if ship["confirm_count"] >= ARRIVAL_CONFIRM_COUNT:
-                                ship["arrival_state"] = "arrived"
-                                if not ship["arrival_completed"] and ship["assegnazione_id"]:
-                                    should_mark = True
-                                    aid = ship["assegnazione_id"]
-                                log(f"[ARRIVED] MMSI={mmsi} "
-                                    f"dist={distance:.0f}m "
-                                    f"assegnazione={ship['assegnazione_id']}")
-                            else:
-                                ship["arrival_state"] = "arriving"
-                        else:
-                            ship["confirm_count"] = 0
-
-                    elif prev_state == "arriving":
-                        if in_geofence:
-                            ship["confirm_count"] += 1
-                            if ship["confirm_count"] >= ARRIVAL_CONFIRM_COUNT:
-                                ship["arrival_state"] = "arrived"
-                                if not ship["arrival_completed"] and ship["assegnazione_id"]:
-                                    should_mark = True
-                                    aid = ship["assegnazione_id"]
-                                log(f"[ARRIVED] MMSI={mmsi} "
-                                    f"dist={distance:.0f}m "
-                                    f"assegnazione={ship['assegnazione_id']}")
-                        else:
-                            ship["arrival_state"] = "navigating"
-                            ship["confirm_count"] = 0
-
-                    # "arrived" → noop
-
-                # Fuori dal lock: lancia task completamento
-                if should_mark and aid:
-                    asyncio.create_task(_background_mark_completed(key, aid, mmsi))
-
-            except Exception as e:
-                log(f"[GEOFENCE ERROR] MMSI={mmsi}: {e}")
 
 async def cleanup_loop():
     """
@@ -1018,14 +981,12 @@ async def startup():
     log(f"Topic Input:          {MAIN_TOPIC}, {SIM_TOPIC}")
     log(f"API Backend:          {API_BASE}")
     log(f"Geofence Radius:      {GEOFENCE_RADIUS_M} m")
-    log(f"Arrival Confirm:      {ARRIVAL_CONFIRM_COUNT} check periodici")
-    log(f"Geofence Interval:    {GEOFENCE_CHECK_INTERVAL_SEC} sec")
+    log(f"Arrival Confirm:      {ARRIVAL_CONFIRM_COUNT} messaggi")
     log(f"Route Cache TTL:      {ROUTE_CACHE_TTL_SEC} sec")
     log(f"Inactive Timeout:     {SHIP_INACTIVE_TIMEOUT_SEC} sec")
     log("=" * 60)
-    log("Worker avviato (real + simulation) — modello periodico")
+    log("Worker avviato (real + simulation)")
     log("=" * 60)
 
-    asyncio.create_task(geofence_check_loop())
     asyncio.create_task(cleanup_loop())
     asyncio.create_task(config_watcher())

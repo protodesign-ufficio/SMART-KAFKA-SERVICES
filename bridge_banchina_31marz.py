@@ -86,7 +86,7 @@ import os
 import time
 from collections import defaultdict
 from functools import reduce
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
@@ -250,38 +250,28 @@ async def _doc_berth_incoming() -> BerthIncomingEvent:
 state_lock = asyncio.Lock()
 """asyncio.Lock: Lock per accesso thread-safe allo stato condiviso"""
 
-ShipKey = Tuple[str, str]
-"""Type alias: Chiave univoca nave = (topic_sorgente, mmsi)"""
-
-ships_db: Dict[ShipKey, dict] = {}
+ships_db: Dict[str, dict] = {}
 """
-Dict[ShipKey, dict]: Database in-memory delle navi indicizzato per (topic, mmsi).
+Dict[str, dict]: Database in-memory delle navi indicizzato per MMSI.
 
-Struttura valore: tutti i campi AIS decodificati + campo "eta" calcolato + "last_seen"
+Struttura valore: tutti i campi AIS decodificati + campo "eta" calcolato
 """
 
-berths: Dict[str, Dict[ShipKey, Dict[str, Any]]] = defaultdict(dict)
+berths: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 """
-Dict[str, Dict[ShipKey, Dict[str, Any]]]: Mappa banchine -> navi in arrivo.
+Dict[str, Dict[str, Dict[str, Any]]]: Mappa banchine -> navi in arrivo.
 
-Struttura: berths[destination][(topic, mmsi)] = {"eta": float, "source": str}
+Struttura: berths[destination][mmsi] = {"eta": float, "source": str}
 
 Esempio:
-    berths["PORTO GENOVA"][("ais.raw", "123456789")] = {"eta": 1670000000.0, "source": "ais.raw"}
+    berths["PORTO GENOVA"]["123456789"] = {"eta": 1670000000.0, "source": "ais.raw"}
 """
 
-multipart_buffer: Dict[tuple, List] = {}
-"""Buffer multipart a coda per ricomposizione frammenti AIS multipart.
-Indicizzato per (topic, canale, total_frammenti)."""
+multipart_buffer: Dict[tuple, dict] = {}
+"""Dict[tuple, dict]: Buffer per ricomposizione messaggi NMEA multipart"""
 
 last_cleanup = time.time()
 """float: Timestamp ultima pulizia buffer multipart"""
-
-MULTIPART_TTL_SEC = 120
-"""float: TTL dei frammenti multipart nel buffer (secondi)."""
-
-SHIP_INACTIVE_TIMEOUT_SEC: float = float(os.getenv("SHIP_INACTIVE_TIMEOUT_SEC", "3600"))
-"""float: Timeout in secondi per rimuovere navi inattive dalla memoria (default: 1 ora)"""
 
 
 # =============================================================================
@@ -305,7 +295,6 @@ def normalize_nmea(raw_value) -> Optional[str]:
     Normalizza un messaggio NMEA grezzo in formato standard AIVDM.
     
     Gestisce diversi formati di input:
-    - dict (da FastStream auto-deserializzazione JSON, es. simulazione)
     - Bytes UTF-8
     - Stringhe con wrapper JSON (es. da Kafka Connect)
     - Messaggi AIVDM diretti
@@ -313,8 +302,8 @@ def normalize_nmea(raw_value) -> Optional[str]:
     
     Parameters
     ----------
-    raw_value : dict | bytes | str
-        Messaggio grezzo
+    raw_value : bytes | str
+        Messaggio grezzo in formato bytes o stringa
     
     Returns
     -------
@@ -322,35 +311,15 @@ def normalize_nmea(raw_value) -> Optional[str]:
         Messaggio NMEA normalizzato o None se parsing fallisce
     """
     try:
-        # Gestione input dict (tipico da ais_simulation.raw deserializzato da FastStream)
-        if isinstance(raw_value, dict):
-            fields = raw_value.get("fields")
-            if isinstance(fields, dict):
-                v = fields.get("value")
-                if isinstance(v, str):
-                    raw_value = v
-            if isinstance(raw_value, dict):
-                v = raw_value.get("value")
-                if isinstance(v, str):
-                    raw_value = v
-
         if isinstance(raw_value, bytes):
             raw_value = raw_value.decode("utf-8", errors="ignore")
-
-        if not isinstance(raw_value, str):
-            return None
 
         raw_value = raw_value.strip()
 
         if raw_value.startswith("{"):
-            try:
-                data = json.loads(raw_value)
-                if "fields" in data and "value" in data["fields"]:
-                    return data["fields"]["value"]
-                if "value" in data and isinstance(data["value"], str):
-                    return data["value"]
-            except Exception:
-                pass
+            data = json.loads(raw_value)
+            if "fields" in data and "value" in data["fields"]:
+                return data["fields"]["value"]
 
         if raw_value.startswith("!AIVDM"):
             return raw_value
@@ -383,19 +352,15 @@ def compute_checksum(body: str) -> str:
 
 def handle_multipart(topic: str, parts) -> Optional[str]:
     """
-    Ricompone messaggi AIS multipart (AIVDM con n>1 frammenti).
-
-    NON usa il campo seq come chiave perché seq è un digit 0-9 condiviso
-    tra tutti i vascelli sullo stesso canale: con 2+ vascelli attivi
-    le collisioni sono inevitabili e causano mescolamento dei frammenti.
-
+    Gestisce la ricomposizione di messaggi AIS multipart.
+    
     Parameters
     ----------
     topic : str
         Nome del topic Kafka sorgente
     parts : list
         Campi del messaggio NMEA (split per ",")
-
+    
     Returns
     -------
     str | None
@@ -404,36 +369,19 @@ def handle_multipart(topic: str, parts) -> Optional[str]:
     try:
         total = int(parts[1])
         index = int(parts[2])
+        seq = parts[3] or "0"
         chan = parts[4]
         payload = parts[5]
 
-        queue_key = (topic, chan, total)
-        queue = multipart_buffer.setdefault(queue_key, [])
+        key = (topic, chan, seq)
+        entry = multipart_buffer.setdefault(key, {"total": total, "parts": {}, "ts": time.time()})
 
-        target_entry = None
-        if index == 1:
-            target_entry = {"total": total, "parts": {}, "ts": time.time()}
-            queue.append(target_entry)
-        else:
-            for entry in queue:
-                if index not in entry["parts"] and len(entry["parts"]) < entry["total"]:
-                    target_entry = entry
-                    break
-            if target_entry is None:
-                target_entry = {"total": total, "parts": {}, "ts": time.time()}
-                queue.append(target_entry)
+        entry["parts"][index] = payload
+        entry["ts"] = time.time()
 
-        target_entry["parts"][index] = payload
-        target_entry["ts"] = time.time()
-
-        if len(target_entry["parts"]) == target_entry["total"]:
-            full = "".join(target_entry["parts"][i] for i in range(1, target_entry["total"] + 1))
-            try:
-                queue.remove(target_entry)
-            except ValueError:
-                pass
-            if not queue:
-                del multipart_buffer[queue_key]
+        if len(entry["parts"]) == total:
+            full = "".join(entry["parts"][i] for i in range(1, total + 1))
+            del multipart_buffer[key]
 
             body = f"AIVDM,1,1,,{chan},{full},0"
             return f"!{body}*{compute_checksum(body)}"
@@ -518,18 +466,18 @@ def cleanup_multipart() -> None:
     """
     Pulizia periodica del buffer multipart.
     
-    Rimuove le ricomposizioni stale (>MULTIPART_TTL_SEC secondi).
-    Eseguita al massimo ogni 60 secondi per efficienza.
+    Rimuove i messaggi incompleti più vecchi di 5 secondi.
+    Eseguita al massimo ogni 10 secondi per efficienza.
     """
     global last_cleanup
     now = time.time()
-    if now - last_cleanup <= 60:
+    if now - last_cleanup < 10:
         return
 
-    for qk, queue in list(multipart_buffer.items()):
-        queue[:] = [entry for entry in queue if now - entry["ts"] <= MULTIPART_TTL_SEC]
-        if not queue:
-            del multipart_buffer[qk]
+    for k, v in list(multipart_buffer.items()):
+        if now - v["ts"] > 5:
+            del multipart_buffer[k]
+
     last_cleanup = now
 
 
@@ -537,14 +485,14 @@ def cleanup_multipart() -> None:
 # CORE PROCESSOR - Elaborazione Messaggi AIS
 # =============================================================================
 
-async def process_ais(topic: str, raw_bytes) -> None:
+async def process_ais(topic: str, raw_bytes: bytes) -> None:
     """
     Processa un messaggio AIS grezzo e aggiorna lo stato delle navi/banchine.
     
     Pipeline di elaborazione:
     1. Pulizia buffer multipart scaduti
     2. Normalizzazione NMEA
-    3. Gestione messaggi bundled multipart (\n-separated) e tradizionali
+    3. Gestione messaggi multipart (se necessario)
     4. Decodifica AIS con pyais
     5. Estrazione MMSI, destinazione, ETA
     6. Aggiornamento database navi e mappa banchine
@@ -553,7 +501,7 @@ async def process_ais(topic: str, raw_bytes) -> None:
     ----------
     topic : str
         Topic Kafka sorgente (ais.raw | ais_simulation.raw)
-    raw_bytes : bytes | dict | str
+    raw_bytes : bytes
         Messaggio AIS grezzo in formato NMEA
     
     Notes
@@ -568,34 +516,18 @@ async def process_ais(topic: str, raw_bytes) -> None:
     if not nmea or not nmea.startswith("!"):
         return
 
-    # Gestione messaggi multi-riga (frammenti bundled in un unico messaggio Kafka)
-    lines = [l.strip() for l in nmea.split("\n") if l.strip().startswith("!AIVDM")]
-    if len(lines) > 1:
-        # Tutti i frammenti sono già presenti: decodifica nativa pyais multipart
-        decode_args = tuple(lines)
-    else:
-        # Singola riga NMEA: gestione standard
-        parts = nmea.split(",")
-        final = nmea
+    parts = nmea.split(",")
+    final = nmea
 
-        # Gestione messaggi multipart (frammenti singoli in messaggi separati)
-        if len(parts) > 5:
-            try:
-                total = int(parts[1])
-                if total > 1:
-                    final = handle_multipart(topic, parts)
-            except Exception:
-                final = None
+    # Gestione messaggi multipart
+    if len(parts) > 5 and int(parts[1]) > 1:
+        final = handle_multipart(topic, parts)
 
-        if not final:
-            return
-        decode_args = (final,)
-
-    try:
-        decoded = ais_decode(*decode_args)
-        data = decoded.asdict() if hasattr(decoded, "asdict") else dict(decoded)
-    except Exception:
+    if not final:
         return
+
+    decoded = ais_decode(final)
+    data = decoded.asdict() if hasattr(decoded, "asdict") else dict(decoded)
 
     mmsi = str(data.get("mmsi") or "")
     
@@ -606,25 +538,22 @@ async def process_ais(topic: str, raw_bytes) -> None:
     # Normalizza la destinazione (uppercase, spazi singoli)
     destination = data.get("destination")
     if destination:
-        destination = " ".join(destination.strip().upper().split()) or None
+        destination = " ".join(destination.strip().upper().split())
 
     # Calcola ETA Unix timestamp
     eta = calculate_eta_timestamp(data)
 
-    key: ShipKey = (topic, mmsi)
-
     async with state_lock:
         # Aggiorna database navi
-        ship = ships_db.setdefault(key, {})
+        ship = ships_db.setdefault(mmsi, {})
         ship.update(data)
-        ship["last_seen"] = time.time()
 
         if eta is not None:
             ship["eta"] = eta
 
             # Se abbiamo destinazione e ETA, aggiungi alla mappa banchine
             if destination and ship.get("eta") is not None:
-                berths[destination][key] = {"eta": ship["eta"], "source": topic}
+                berths[destination][mmsi] = {"eta": ship["eta"], "source": topic}
 
 
 # =============================================================================
@@ -688,16 +617,13 @@ async def publisher_loop():
         async with state_lock:
             snapshot = {d: dict(v) for d, v in berths.items()}
 
-        for destination, ships_map in snapshot.items():
+        for destination, ships in snapshot.items():
             # Filtra navi con ETA nella finestra temporale
-            incoming = []
-            for ship_key, info in ships_map.items():
-                eta_val = info.get("eta", 0)
-                if now < eta_val <= horizon:
-                    _, mmsi = ship_key  # ShipKey = (topic, mmsi)
-                    incoming.append(IncomingVessel(
-                        mmsi=mmsi, eta=eta_val, source=info.get("source")
-                    ))
+            incoming = [
+                IncomingVessel(mmsi=mmsi, eta=info.get("eta"), source=info.get("source"))
+                for mmsi, info in ships.items()
+                if now < info.get("eta", 0) <= horizon
+            ]
 
             # Ordina per ETA crescente
             incoming.sort(key=lambda x: x.eta)
@@ -760,43 +686,6 @@ async def config_watcher():
             CONFIG_LAST_UPDATE = last
 
 
-async def cleanup_inactive_ships() -> None:
-    """
-    Rimuove dalla memoria le navi inattive.
-
-    Una nave viene rimossa quando non riceve dati per un tempo
-    superiore a SHIP_INACTIVE_TIMEOUT_SEC (default: 1 ora).
-    """
-    now = time.time()
-    async with state_lock:
-        for key in list(ships_db.keys()):
-            ship = ships_db[key]
-            last_seen = ship.get("last_seen", 0)
-
-            if now - last_seen > SHIP_INACTIVE_TIMEOUT_SEC:
-                _, mmsi = key
-                log(f"[CLEANUP] Rimozione nave MMSI={mmsi} (inattiva per >{SHIP_INACTIVE_TIMEOUT_SEC:.0f}s)")
-                del ships_db[key]
-
-        # Pulisci anche berths: rimuovi entry il cui ShipKey non è più in ships_db
-        for dest in list(berths.keys()):
-            for sk in list(berths[dest].keys()):
-                if sk not in ships_db:
-                    del berths[dest][sk]
-            if not berths[dest]:
-                del berths[dest]
-
-
-async def cleanup_loop():
-    """
-    Loop asincrono per pulizia periodica delle navi inattive.
-    Eseguito ogni 5 minuti.
-    """
-    while True:
-        await asyncio.sleep(300)
-        await cleanup_inactive_ships()
-
-
 # =============================================================================
 # LIFECYCLE HOOKS
 # =============================================================================
@@ -822,4 +711,3 @@ async def startup():
 
     asyncio.create_task(publisher_loop())
     asyncio.create_task(config_watcher())
-    asyncio.create_task(cleanup_loop())

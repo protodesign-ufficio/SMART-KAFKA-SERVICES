@@ -117,31 +117,15 @@ services:
       - kafka-net
 
   # =======================
-  # DECODER AIS FASTSTREAM (SPLIT: main + sim separati)
+  # DECODER AIS FASTSTREAM (UNIFIED)
   # =======================
-  # Decoder SOLO per AIS reali (ais.raw -> ais_decoded.raw)
-  decoder-ais-main:
+  decoder-ais-faststream:
     image: decoder-ais-faststream
     build:
       context: .
       dockerfile: Dockerfile.decoder_ais_faststream
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
-      DECODER_MODE: main
-    restart: unless-stopped
-    networks:
-      - kafka-net
-
-  # Decoder DEDICATO per simulazione (ais_simulation.raw -> ais_decoded_simulation.raw)
-  # Istanza separata = event loop isolato, nessuna contesa con AIS reale
-  decoder-ais-sim:
-    image: decoder-ais-faststream
-    build:
-      context: .
-      dockerfile: Dockerfile.decoder_ais_faststream
-    environment:
-      BOOTSTRAP_SERVERS: kafka:9092
-      DECODER_MODE: sim
     restart: unless-stopped
     networks:
       - kafka-net
