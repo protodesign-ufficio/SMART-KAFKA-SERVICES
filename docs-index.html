@@ -3,325 +3,563 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AIS Analytics — Documentazione Servizi</title>
+  <title>SMART-DSS — Portale Servizi</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0b0e17;
+      --surface:   #131829;
+      --surface2:  #1a2035;
+      --border:    #242c42;
+      --border-hi: #334166;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --dim:       #94a3b8;
+      --code-bg:   #0d1117;
+    }
 
     body {
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
                    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      background: #0f1117;
-      color: #e2e8f0;
+      background: var(--bg);
+      color: var(--text);
       min-height: 100vh;
-      padding: 48px 24px;
+      padding: 0 0 64px;
     }
 
-    header {
-      max-width: 860px;
-      margin: 0 auto 48px;
-      border-bottom: 1px solid #2d3748;
-      padding-bottom: 32px;
+    /* ── TOP BAR ─────────────────────────────────── */
+    .topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 18px 40px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
     }
-
-    header h1 {
-      font-size: 2rem;
+    .topbar-logo {
+      font-size: 1.1rem;
       font-weight: 700;
-      letter-spacing: -0.5px;
-      color: #f7fafc;
+      color: #f1f5f9;
+      letter-spacing: -0.3px;
     }
-
-    header p {
-      margin-top: 10px;
-      color: #94a3b8;
-      font-size: 1rem;
-      line-height: 1.6;
-      max-width: 680px;
+    .topbar-logo span { color: #4f86f7; }
+    .topbar-sub {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 1px;
     }
-
-    .bus-diagram {
-      margin-top: 24px;
-      background: #1a1f2e;
-      border: 1px solid #2d3748;
-      border-radius: 8px;
-      padding: 16px 20px;
-      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-      font-size: 0.8rem;
+    .topbar-env {
+      margin-left: auto;
+      font-size: 0.72rem;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      background: #0d1525;
+      border: 1px solid var(--border);
       color: #7dd3fc;
+      padding: 4px 12px;
+      border-radius: 20px;
+    }
+
+    /* ── HERO ────────────────────────────────────── */
+    .hero {
+      max-width: 1100px;
+      margin: 52px auto 0;
+      padding: 0 32px;
+    }
+    .hero h1 {
+      font-size: 2.1rem;
+      font-weight: 700;
+      color: #f7fafc;
+      letter-spacing: -0.5px;
+      line-height: 1.2;
+    }
+    .hero p {
+      margin-top: 12px;
+      color: var(--dim);
+      font-size: 1rem;
       line-height: 1.7;
+      max-width: 720px;
+    }
+
+    /* ── ARCH DIAGRAM ────────────────────────────── */
+    .arch {
+      max-width: 1100px;
+      margin: 36px auto 0;
+      padding: 0 32px;
+    }
+    .arch-box {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 24px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.75rem;
+      color: #7dd3fc;
+      line-height: 1.8;
       overflow-x: auto;
       white-space: pre;
     }
 
-    .grid {
-      max-width: 860px;
-      margin: 0 auto;
-      display: grid;
-      gap: 20px;
+    /* ── SECTIONS ────────────────────────────────── */
+    .section {
+      max-width: 1100px;
+      margin: 52px auto 0;
+      padding: 0 32px;
+    }
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .section-label h2 {
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .section-label::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
     }
 
+    /* ── CARD GRID ───────────────────────────────── */
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+
+    @media (max-width: 900px) {
+      .grid-3, .grid-5 { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 600px) {
+      .grid-3, .grid-2, .grid-5 { grid-template-columns: 1fr; }
+    }
+
+    /* ── CARD ────────────────────────────────────── */
     .card {
-      background: #1a1f2e;
-      border: 1px solid #2d3748;
+      background: var(--surface);
+      border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 28px 32px;
-      transition: border-color 0.2s, box-shadow 0.2s;
+      padding: 22px 24px 20px;
       text-decoration: none;
       color: inherit;
-      display: block;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color 0.18s, box-shadow 0.18s, transform 0.15s;
     }
-
     .card:hover {
-      border-color: #4f86f7;
-      box-shadow: 0 0 0 1px #4f86f7, 0 8px 24px rgba(79, 134, 247, 0.1);
+      border-color: var(--accent, #4f86f7);
+      box-shadow: 0 0 0 1px var(--accent, #4f86f7),
+                  0 8px 28px rgba(79, 134, 247, 0.08);
+      transform: translateY(-1px);
     }
 
-    .card-top {
+    .card-head {
       display: flex;
       align-items: flex-start;
-      gap: 16px;
+      justify-content: space-between;
+      gap: 8px;
     }
-
+    .card-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.15rem;
+      flex-shrink: 0;
+    }
     .port-badge {
-      background: #1e3a5f;
-      border: 1px solid #2563eb;
-      color: #93c5fd;
       font-family: "SFMono-Regular", Consolas, monospace;
-      font-size: 0.75rem;
+      font-size: 0.68rem;
       font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 6px;
+      padding: 3px 9px;
+      border-radius: 20px;
       white-space: nowrap;
-      margin-top: 3px;
+      border: 1px solid;
     }
 
     .card-title {
-      font-size: 1.15rem;
+      font-size: 0.95rem;
       font-weight: 600;
       color: #f1f5f9;
+      line-height: 1.3;
     }
-
-    .card-subtitle {
+    .card-desc {
       font-size: 0.82rem;
-      color: #64748b;
-      margin-top: 2px;
-      font-family: "SFMono-Regular", Consolas, monospace;
-    }
-
-    .card-description {
-      margin-top: 14px;
-      color: #94a3b8;
-      font-size: 0.9rem;
-      line-height: 1.65;
+      color: var(--dim);
+      line-height: 1.6;
+      flex: 1;
     }
 
     .tags {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 16px;
+      gap: 6px;
+      margin-top: 4px;
     }
-
     .tag {
-      font-size: 0.72rem;
+      font-size: 0.66rem;
       font-weight: 500;
-      padding: 3px 10px;
+      padding: 2px 8px;
       border-radius: 20px;
       border: 1px solid;
+      white-space: nowrap;
     }
 
-    .tag-input  { color: #6ee7b7; border-color: #065f46; background: #022c22; }
-    .tag-output { color: #fca5a5; border-color: #7f1d1d; background: #2d0c0c; }
-    .tag-rest   { color: #fcd34d; border-color: #78350f; background: #2c1a00; }
-    .tag-sim    { color: #c4b5fd; border-color: #4c1d95; background: #1e0d3f; }
+    /* ── COLOR THEMES ────────────────────────────── */
+    /* Blue — API / Gateway */
+    .blue  { --accent: #4f86f7; }
+    .blue .card-icon  { background: #0d1f42; color: #93c5fd; }
+    .blue .port-badge { color: #93c5fd; border-color: #1d3e7a; background: #091428; }
 
-    .arrow {
-      display: inline-block;
-      margin-left: auto;
-      color: #4f86f7;
-      font-size: 1.25rem;
-      align-self: center;
-      opacity: 0.7;
-      transition: opacity 0.2s, transform 0.2s;
-    }
+    /* Green — Database */
+    .green { --accent: #34d399; }
+    .green .card-icon { background: #022c22; color: #6ee7b7; }
+    .green .port-badge{ color: #6ee7b7; border-color: #065f46; background: #011810; }
 
-    .card:hover .arrow {
-      opacity: 1;
-      transform: translateX(4px);
-    }
+    /* Purple — AIS docs */
+    .purple { --accent: #a78bfa; }
+    .purple .card-icon { background: #1e0d3f; color: #c4b5fd; }
+    .purple .port-badge{ color: #c4b5fd; border-color: #4c1d95; background: #120825; }
 
+    /* Orange — Kafka */
+    .orange { --accent: #fb923c; }
+    .orange .card-icon { background: #2c1a00; color: #fcd34d; }
+    .orange .port-badge{ color: #fcd34d; border-color: #78350f; background: #1c1000; }
+
+    /* Tag colors */
+    .t-in  { color: #6ee7b7; border-color: #065f46; background: #022c22; }
+    .t-out { color: #fca5a5; border-color: #7f1d1d; background: #2d0c0c; }
+    .t-rest{ color: #fcd34d; border-color: #78350f; background: #2c1a00; }
+    .t-sim { color: #c4b5fd; border-color: #4c1d95; background: #1e0d3f; }
+    .t-db  { color: #6ee7b7; border-color: #065f46; background: #022c22; }
+
+    /* ── FOOTER ──────────────────────────────────── */
     footer {
-      max-width: 860px;
-      margin: 48px auto 0;
-      color: #475569;
-      font-size: 0.8rem;
-      text-align: center;
-      border-top: 1px solid #1e293b;
-      padding-top: 24px;
+      max-width: 1100px;
+      margin: 64px auto 0;
+      padding: 24px 32px 0;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.75rem;
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
     }
   </style>
 </head>
 <body>
 
-<header>
-  <h1>AIS Analytics — Documentazione Servizi</h1>
-  <p>
-    Portale di accesso alla documentazione AsyncAPI dei worker di elaborazione
-    dati AIS (Automatic Identification System). Ogni servizio consuma messaggi
-    NMEA/AIVDM dal bus Kafka e produce analisi specifiche per il dominio portuale.
-  </p>
-  <div class="bus-diagram">ais.raw  ──┬──► decoder-ais-faststream ──► ais_decoded.raw
-(AIS reale) │
-           ├──► bridge-banchina   ──┐
-           ├──► bridge-deltaeta   ──┤
-           ├──► bridge-components ──┼──► analytics_ais.raw
-           └──► bridge-arrivo     ──┘  (+ PATCH REST al completamento)
-
-ais_simulation.raw  ──► (stessi bridge, canale simulazione parallelo)</div>
-</header>
-
-<div class="grid">
-
-  <!-- 9000 Bridge Delta ETA -->
-  <a class="card" href="http://87.26.178.190:9000" target="_blank">
-    <div class="card-top">
-      <div>
-        <div class="port-badge">:9000</div>
-      </div>
-      <div style="flex:1">
-        <div class="card-title">Bridge Delta ETA</div>
-        <div class="card-subtitle">bridge-deltaeta · analytics_ais.raw</div>
-        <div class="card-description">
-          Calcola lo scostamento (<strong>delta_min</strong>) tra l'ETA dichiarata dalla
-          nave via AIS e l'orario di arrivo pianificato recuperato dal backend REST.
-          Un valore positivo indica ritardo, negativo indica anticipo.
-          Supporta la simulazione tramite <code>SIM_SPEED_FACTOR</code> per comprimere
-          il tempo di percorrenza simulato. Pubblica un evento per nave ogni
-          <code>PUBLISH_INTERVAL</code> secondi.
-        </div>
-        <div class="tags">
-          <span class="tag tag-input">consume: ais.raw</span>
-          <span class="tag tag-sim">consume: ais_simulation.raw</span>
-          <span class="tag tag-output">publish: analytics_ais.raw</span>
-          <span class="tag tag-rest">GET /percorso/by_mmsi/{mmsi}</span>
-        </div>
-      </div>
-      <span class="arrow">→</span>
-    </div>
-  </a>
-
-  <!-- 9001 Bridge Banchina -->
-  <a class="card" href="http://87.26.178.190:9001" target="_blank">
-    <div class="card-top">
-      <div>
-        <div class="port-badge">:9001</div>
-      </div>
-      <div style="flex:1">
-        <div class="card-title">Bridge Banchina</div>
-        <div class="card-subtitle">bridge-banchina · analytics_ais.raw</div>
-        <div class="card-description">
-          Aggrega le navi in arrivo per banchina/destinazione, filtrando quelle con
-          ETA entro la finestra temporale <code>WINDOW_FUTURE_MIN</code>.
-          Ogni <code>PUBLISH_INTERVAL</code> secondi emette un evento
-          <strong>BerthIncomingEvent</strong> con la lista ordinata per ETA crescente
-          delle navi dirette verso ciascuna banchina attiva.
-        </div>
-        <div class="tags">
-          <span class="tag tag-input">consume: ais.raw</span>
-          <span class="tag tag-sim">consume: ais_simulation.raw</span>
-          <span class="tag tag-output">publish: analytics_ais.raw</span>
-        </div>
-      </div>
-      <span class="arrow">→</span>
-    </div>
-  </a>
-
-  <!-- 9002 Bridge Components -->
-  <a class="card" href="http://87.26.178.190:9002" target="_blank">
-    <div class="card-top">
-      <div>
-        <div class="port-badge">:9002</div>
-      </div>
-      <div style="flex:1">
-        <div class="card-title">Bridge Components</div>
-        <div class="card-subtitle">bridge-components · analytics_ais.raw</div>
-        <div class="card-description">
-          Traccia il tempo di utilizzo (<strong>usage_seconds_total</strong>) di
-          ciascun componente di bordo installato sulle navi in movimento (SOG &gt; 0.1 nodi).
-          I componenti vengono recuperati via REST con cache TTL configurabile.
-          Pubblica un <strong>ComponentUsageEvent</strong> per ogni coppia
-          (MMSI, componente) attiva ogni <code>PUBLISH_INTERVAL_SEC</code> secondi.
-        </div>
-        <div class="tags">
-          <span class="tag tag-input">consume: ais.raw</span>
-          <span class="tag tag-sim">consume: ais_simulation.raw</span>
-          <span class="tag tag-output">publish: analytics_ais.raw</span>
-          <span class="tag tag-rest">GET /componente/by_mmsi/{mmsi}</span>
-        </div>
-      </div>
-      <span class="arrow">→</span>
-    </div>
-  </a>
-
-  <!-- 9003 Decoder AIS FastStream -->
-  <a class="card" href="http://87.26.178.190:9003" target="_blank">
-    <div class="card-top">
-      <div>
-        <div class="port-badge">:9003</div>
-      </div>
-      <div style="flex:1">
-        <div class="card-title">Decoder AIS FastStream</div>
-        <div class="card-subtitle">decoder-ais-faststream · ais_decoded.raw / ais_decoded_simulation.raw</div>
-        <div class="card-description">
-          Decodifica i frame NMEA/AIVDM grezzi (ITU-R M.1371) tramite <code>pyais</code>
-          e normalizza il risultato in eventi <strong>AisDecodedEvent</strong> strutturati
-          con posizione, SOG, COG, tipo messaggio AIS e payload statico (Tipo 5).
-          Gestisce messaggi multipart con buffer a coda TTL 120s.
-          Due istanze separate: <em>main</em> (AIS reale) e <em>sim</em> (simulazione).
-        </div>
-        <div class="tags">
-          <span class="tag tag-input">consume: ais.raw</span>
-          <span class="tag tag-sim">consume: ais_simulation.raw</span>
-          <span class="tag tag-output">publish: ais_decoded.raw</span>
-          <span class="tag tag-output">publish: ais_decoded_simulation.raw</span>
-        </div>
-      </div>
-      <span class="arrow">→</span>
-    </div>
-  </a>
-
-  <!-- 9004 Bridge Arrivo -->
-  <a class="card" href="http://87.26.178.190:9004" target="_blank">
-    <div class="card-top">
-      <div>
-        <div class="port-badge">:9004</div>
-      </div>
-      <div style="flex:1">
-        <div class="card-title">Bridge Arrivo</div>
-        <div class="card-subtitle">bridge-arrivo · REST PATCH /assegnazione/{id}/stato</div>
-        <div class="card-description">
-          Rileva l'arrivo della nave a destinazione tramite geofencing haversine
-          (raggio <code>GEOFENCE_RADIUS_M</code>). Implementa una state machine
-          per nave: <em>navigating → arriving → arrived</em>.
-          Dopo <code>ARRIVAL_CONFIRM_COUNT</code> check consecutivi all'interno del
-          geofence, chiama il backend REST per segnare l'assegnazione come
-          <strong>COMPLETATA</strong>. Nessun output su Kafka — l'unico effetto
-          è la chiamata REST.
-        </div>
-        <div class="tags">
-          <span class="tag tag-input">consume: ais.raw</span>
-          <span class="tag tag-sim">consume: ais_simulation.raw</span>
-          <span class="tag tag-rest">PATCH /assegnazione/{id}/stato</span>
-          <span class="tag tag-rest">GET /percorso/by_mmsi/{mmsi}</span>
-        </div>
-      </div>
-      <span class="arrow">→</span>
-    </div>
-  </a>
-
+<div class="topbar">
+  <div>
+    <div class="topbar-logo">SMART<span>-DSS</span></div>
+    <div class="topbar-sub">Sistema di Supporto Decisionale per la Navigazione Marittima</div>
+  </div>
+  <div class="topbar-env">87.26.178.190</div>
 </div>
 
+<div class="hero">
+  <h1>Portale Servizi</h1>
+  <p>
+    Accesso centralizzato a tutti i servizi della piattaforma: API Gateway, esplorazione database,
+    bus di messaggistica Kafka e documentazione AsyncAPI dei worker AIS.
+  </p>
+</div>
+
+<div class="arch">
+  <div class="arch-box">Browser / Client
+     │
+     ├──► API Gateway  :25080   ──► microservizi interni (anagrafica, operativo, percorsi, forecast, alerting, telemetry, weather)
+     │          │                        │
+     │          └──► PostgreSQL 18 + PostGIS   ◄──► DB Explorer  :8080
+     │
+     ├──► Kafka bus
+     │       ais.raw / ais_simulation.raw
+     │          ├──► decoder-ais-faststream  :9003  ──► ais_decoded.raw / ais_decoded_simulation.raw
+     │          ├──► bridge-banchina        :9001  ──► analytics_ais.raw
+     │          ├──► bridge-deltaeta        :9000  ──► analytics_ais.raw
+     │          ├──► bridge-components      :9002  ──► analytics_ais.raw
+     │          └──► bridge-arrivo          :9004  ──► PATCH /assegnazione/{id}/stato
+     │
+     └──► Docs index   :9005   (questa pagina)</div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     SEZIONE 1 — PIATTAFORMA PRINCIPALE
+════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label"><h2>Piattaforma principale</h2></div>
+  <div class="grid-2">
+
+    <!-- API Gateway -->
+    <a class="card blue" href="http://87.26.178.190:25080/docs" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">⚡</div>
+        <span class="port-badge">:25080</span>
+      </div>
+      <div class="card-title">API Gateway — SMART-DSS</div>
+      <div class="card-desc">
+        Backend FastAPI centralizzato. Coordina 13 microservizi interni (anagrafica, operativo,
+        percorsi, forecast, alerting, telemetria, weather, simulatore, ottimizzatore, scheduler,
+        replanning). Espone 14 gruppi di endpoint REST, Swagger interattivo e health check.
+        Gestisce hot-reload della configurazione Kafka runtime.
+      </div>
+      <div class="tags">
+        <span class="tag t-rest">Swagger /docs</span>
+        <span class="tag t-rest">14 router</span>
+        <span class="tag t-rest">ML ensemble</span>
+        <span class="tag t-rest">Weather routing</span>
+        <span class="tag t-rest">APScheduler</span>
+      </div>
+    </a>
+
+    <!-- DB Explorer -->
+    <a class="card green" href="http://87.26.178.190:8080" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🗄</div>
+        <span class="port-badge">:8080</span>
+      </div>
+      <div class="card-title">Database Explorer — PG Dump</div>
+      <div class="card-desc">
+        Interfaccia web read-only per esplorare i database PostgreSQL. Supporta dump
+        <code>.sql</code>, <code>.dump</code>, <code>.backup</code>, <code>.tar</code>.
+        Visualizza tabelle con tipo colonne, PK/FK badge, indici, foreign key e dati
+        paginati. Protetto da Basic Auth e allowlist IP RFC1918.
+      </div>
+      <div class="tags">
+        <span class="tag t-db">anagrafica_db</span>
+        <span class="tag t-db">operativo_db</span>
+        <span class="tag t-db">percorsi_db</span>
+        <span class="tag t-db">forecast_db</span>
+        <span class="tag t-db">weather_db</span>
+        <span class="tag t-db">read-only</span>
+      </div>
+    </a>
+
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     SEZIONE 2 — WORKER AIS (KAFKA)
+════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label"><h2>Worker AIS — Documentazione AsyncAPI</h2></div>
+  <div class="grid-5">
+
+    <!-- 9000 Delta ETA -->
+    <a class="card purple" href="http://87.26.178.190:9000" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">⏱</div>
+        <span class="port-badge">:9000</span>
+      </div>
+      <div class="card-title">Bridge Delta ETA</div>
+      <div class="card-desc">
+        Calcola <strong>delta_min</strong> tra ETA AIS e orario pianificato.
+        Positivo = ritardo, negativo = anticipo.
+        Supporta <code>SIM_SPEED_FACTOR</code> per simulazione.
+      </div>
+      <div class="tags">
+        <span class="tag t-in">ais.raw</span>
+        <span class="tag t-out">analytics_ais.raw</span>
+      </div>
+    </a>
+
+    <!-- 9001 Banchina -->
+    <a class="card purple" href="http://87.26.178.190:9001" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">⚓</div>
+        <span class="port-badge">:9001</span>
+      </div>
+      <div class="card-title">Bridge Banchina</div>
+      <div class="card-desc">
+        Aggrega navi in arrivo per banchina/destinazione nella finestra ETA
+        <code>WINDOW_FUTURE_MIN</code>. Pubblica lista ordinata per ETA.
+      </div>
+      <div class="tags">
+        <span class="tag t-in">ais.raw</span>
+        <span class="tag t-out">analytics_ais.raw</span>
+      </div>
+    </a>
+
+    <!-- 9002 Components -->
+    <a class="card purple" href="http://87.26.178.190:9002" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🔧</div>
+        <span class="port-badge">:9002</span>
+      </div>
+      <div class="card-title">Bridge Components</div>
+      <div class="card-desc">
+        Traccia <strong>usage_seconds_total</strong> per componente di bordo.
+        Attivo quando SOG &gt; 0.1 nodi. Cache componenti via REST backend.
+      </div>
+      <div class="tags">
+        <span class="tag t-in">ais.raw</span>
+        <span class="tag t-out">analytics_ais.raw</span>
+      </div>
+    </a>
+
+    <!-- 9003 Decoder -->
+    <a class="card purple" href="http://87.26.178.190:9003" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">📡</div>
+        <span class="port-badge">:9003</span>
+      </div>
+      <div class="card-title">Decoder AIS</div>
+      <div class="card-desc">
+        Decodifica frame NMEA/AIVDM (ITU-R M.1371) tramite <code>pyais</code>.
+        Due istanze: <em>main</em> (reale) e <em>sim</em> (simulazione).
+        Buffer multipart TTL 120s.
+      </div>
+      <div class="tags">
+        <span class="tag t-in">ais.raw</span>
+        <span class="tag t-out">ais_decoded.raw</span>
+      </div>
+    </a>
+
+    <!-- 9004 Arrivo -->
+    <a class="card purple" href="http://87.26.178.190:9004" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🏁</div>
+        <span class="port-badge">:9004</span>
+      </div>
+      <div class="card-title">Bridge Arrivo</div>
+      <div class="card-desc">
+        Geofencing haversine. State machine
+        <em>navigating → arriving → arrived</em>.
+        Alla conferma chiama <code>PATCH /assegnazione/{id}/stato</code>.
+      </div>
+      <div class="tags">
+        <span class="tag t-in">ais.raw</span>
+        <span class="tag t-rest">PATCH REST</span>
+      </div>
+    </a>
+
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     SEZIONE 3 — MICROSERVIZI INTERNI
+════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label"><h2>Microservizi interni SMART-DSS</h2></div>
+  <div class="grid-3">
+
+    <a class="card blue" href="http://87.26.178.190:25080/docs#/Porti" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🗺</div>
+        <span class="port-badge">:18070</span>
+      </div>
+      <div class="card-title">Anagrafica</div>
+      <div class="card-desc">
+        Porti (coordinate WGS84/PostGIS), tratte geografiche (LineString), vascelli
+        (MMSI, capacità, consumi, immagini). API accessibile via Gateway.
+      </div>
+      <div class="tags">
+        <span class="tag t-db">anagrafica_db</span>
+        <span class="tag t-rest">porti · tratte · vascelli</span>
+      </div>
+    </a>
+
+    <a class="card blue" href="http://87.26.178.190:25080/docs#/Corse" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🚢</div>
+        <span class="port-badge">:18072</span>
+      </div>
+      <div class="card-title">Operativo</div>
+      <div class="card-desc">
+        Corse, piani giornalieri, assegnazioni (PIANIFICATA → IN_CORSO → COMPLETATA),
+        deadhead trips. Ciclo di vita operativo completo con validazione KPI.
+      </div>
+      <div class="tags">
+        <span class="tag t-db">operativo_db</span>
+        <span class="tag t-rest">corse · piani · assegnazioni</span>
+      </div>
+    </a>
+
+    <a class="card blue" href="http://87.26.178.190:25080/docs#/Percorsi" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🧭</div>
+        <span class="port-badge">:18073</span>
+      </div>
+      <div class="card-title">Percorsi</div>
+      <div class="card-desc">
+        Rotte ottimizzate da weather routing (GeoJSON + KPI). Calcolo ETA e tempo
+        percorrenza per ogni assegnazione. Usato da bridge-deltaeta e bridge-arrivo.
+      </div>
+      <div class="tags">
+        <span class="tag t-db">percorsi_db</span>
+        <span class="tag t-rest">GeoJSON · ETA · by_mmsi</span>
+      </div>
+    </a>
+
+    <a class="card blue" href="http://87.26.178.190:25080/docs#/Weather" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">🌊</div>
+        <span class="port-badge">:18076</span>
+      </div>
+      <div class="card-title">Weather</div>
+      <div class="card-desc">
+        Fetch e cache persistente dati meteo-marini Copernicus (NetCDF).
+        Layer dashboard correnti/onde, scenari what-if CRUD, cache layer con TTL.
+      </div>
+      <div class="tags">
+        <span class="tag t-db">weather_db</span>
+        <span class="tag t-rest">Copernicus Marine</span>
+        <span class="tag t-rest">NetCDF</span>
+      </div>
+    </a>
+
+    <a class="card blue" href="http://87.26.178.190:25080/docs#/Simulazione" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">⚙️</div>
+        <span class="port-badge">:15001</span>
+      </div>
+      <div class="card-title">Simulator</div>
+      <div class="card-desc">
+        Simulazione fisica navigazione in tempo reale. Genera dati AIS sintetici
+        su <code>ais_simulation.raw</code>. Supporta disturbanze (speed decay, correnti).
+      </div>
+      <div class="tags">
+        <span class="tag t-sim">ais_simulation.raw</span>
+        <span class="tag t-rest">start · stop · status</span>
+      </div>
+    </a>
+
+    <a class="card blue" href="http://87.26.178.190:25080/docs#/Pianificazione" target="_blank">
+      <div class="card-head">
+        <div class="card-icon">📊</div>
+        <span class="port-badge">:18090 · :18091</span>
+      </div>
+      <div class="card-title">Ottimizzatore &amp; Scheduler</div>
+      <div class="card-desc">
+        Weather routing multi-obiettivo (NAMOA*) con dati Copernicus.
+        Scheduling flotta Pareto-ottimale. Replanning adattivo su ritardi via Kafka.
+      </div>
+      <div class="tags">
+        <span class="tag t-rest">NAMOA*</span>
+        <span class="tag t-rest">Pareto</span>
+        <span class="tag t-in">analytics_ais.raw</span>
+      </div>
+    </a>
+
+  </div>
+</div>
+
+
 <footer>
-  AIS Analytics Platform &mdash; AsyncAPI 3.0 &mdash; FastStream 0.6.7
+  <span>SMART-DSS Platform</span>
+  <span>AIS Analytics · FastStream 0.6.7 · AsyncAPI 3.0</span>
+  <span>FastAPI · PostgreSQL 18 + PostGIS · Apache Kafka</span>
+  <span style="margin-left:auto; color: #334166;">87.26.178.190</span>
 </footer>
 
 </body>
