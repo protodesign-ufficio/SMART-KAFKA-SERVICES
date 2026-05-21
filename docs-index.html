@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIS Analytics — Documentazione Servizi</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 48px 24px;
+    }
+
+    header {
+      max-width: 860px;
+      margin: 0 auto 48px;
+      border-bottom: 1px solid #2d3748;
+      padding-bottom: 32px;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #f7fafc;
+    }
+
+    header p {
+      margin-top: 10px;
+      color: #94a3b8;
+      font-size: 1rem;
+      line-height: 1.6;
+      max-width: 680px;
+    }
+
+    .bus-diagram {
+      margin-top: 24px;
+      background: #1a1f2e;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 16px 20px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.8rem;
+      color: #7dd3fc;
+      line-height: 1.7;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .grid {
+      max-width: 860px;
+      margin: 0 auto;
+      display: grid;
+      gap: 20px;
+    }
+
+    .card {
+      background: #1a1f2e;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 28px 32px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      text-decoration: none;
+      color: inherit;
+      display: block;
+    }
+
+    .card:hover {
+      border-color: #4f86f7;
+      box-shadow: 0 0 0 1px #4f86f7, 0 8px 24px rgba(79, 134, 247, 0.1);
+    }
+
+    .card-top {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    .port-badge {
+      background: #1e3a5f;
+      border: 1px solid #2563eb;
+      color: #93c5fd;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+      margin-top: 3px;
+    }
+
+    .card-title {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+
+    .card-subtitle {
+      font-size: 0.82rem;
+      color: #64748b;
+      margin-top: 2px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+
+    .card-description {
+      margin-top: 14px;
+      color: #94a3b8;
+      font-size: 0.9rem;
+      line-height: 1.65;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .tag {
+      font-size: 0.72rem;
+      font-weight: 500;
+      padding: 3px 10px;
+      border-radius: 20px;
+      border: 1px solid;
+    }
+
+    .tag-input  { color: #6ee7b7; border-color: #065f46; background: #022c22; }
+    .tag-output { color: #fca5a5; border-color: #7f1d1d; background: #2d0c0c; }
+    .tag-rest   { color: #fcd34d; border-color: #78350f; background: #2c1a00; }
+    .tag-sim    { color: #c4b5fd; border-color: #4c1d95; background: #1e0d3f; }
+
+    .arrow {
+      display: inline-block;
+      margin-left: auto;
+      color: #4f86f7;
+      font-size: 1.25rem;
+      align-self: center;
+      opacity: 0.7;
+      transition: opacity 0.2s, transform 0.2s;
+    }
+
+    .card:hover .arrow {
+      opacity: 1;
+      transform: translateX(4px);
+    }
+
+    footer {
+      max-width: 860px;
+      margin: 48px auto 0;
+      color: #475569;
+      font-size: 0.8rem;
+      text-align: center;
+      border-top: 1px solid #1e293b;
+      padding-top: 24px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>AIS Analytics — Documentazione Servizi</h1>
+  <p>
+    Portale di accesso alla documentazione AsyncAPI dei worker di elaborazione
+    dati AIS (Automatic Identification System). Ogni servizio consuma messaggi
+    NMEA/AIVDM dal bus Kafka e produce analisi specifiche per il dominio portuale.
+  </p>
+  <div class="bus-diagram">ais.raw  ──┬──► decoder-ais-faststream ──► ais_decoded.raw
+(AIS reale) │
+           ├──► bridge-banchina   ──┐
+           ├──► bridge-deltaeta   ──┤
+           ├──► bridge-components ──┼──► analytics_ais.raw
+           └──► bridge-arrivo     ──┘  (+ PATCH REST al completamento)
+
+ais_simulation.raw  ──► (stessi bridge, canale simulazione parallelo)</div>
+</header>
+
+<div class="grid">
+
+  <!-- 9000 Bridge Delta ETA -->
+  <a class="card" href="http://87.26.178.190:9000" target="_blank">
+    <div class="card-top">
+      <div>
+        <div class="port-badge">:9000</div>
+      </div>
+      <div style="flex:1">
+        <div class="card-title">Bridge Delta ETA</div>
+        <div class="card-subtitle">bridge-deltaeta · analytics_ais.raw</div>
+        <div class="card-description">
+          Calcola lo scostamento (<strong>delta_min</strong>) tra l'ETA dichiarata dalla
+          nave via AIS e l'orario di arrivo pianificato recuperato dal backend REST.
+          Un valore positivo indica ritardo, negativo indica anticipo.
+          Supporta la simulazione tramite <code>SIM_SPEED_FACTOR</code> per comprimere
+          il tempo di percorrenza simulato. Pubblica un evento per nave ogni
+          <code>PUBLISH_INTERVAL</code> secondi.
+        </div>
+        <div class="tags">
+          <span class="tag tag-input">consume: ais.raw</span>
+          <span class="tag tag-sim">consume: ais_simulation.raw</span>
+          <span class="tag tag-output">publish: analytics_ais.raw</span>
+          <span class="tag tag-rest">GET /percorso/by_mmsi/{mmsi}</span>
+        </div>
+      </div>
+      <span class="arrow">→</span>
+    </div>
+  </a>
+
+  <!-- 9001 Bridge Banchina -->
+  <a class="card" href="http://87.26.178.190:9001" target="_blank">
+    <div class="card-top">
+      <div>
+        <div class="port-badge">:9001</div>
+      </div>
+      <div style="flex:1">
+        <div class="card-title">Bridge Banchina</div>
+        <div class="card-subtitle">bridge-banchina · analytics_ais.raw</div>
+        <div class="card-description">
+          Aggrega le navi in arrivo per banchina/destinazione, filtrando quelle con
+          ETA entro la finestra temporale <code>WINDOW_FUTURE_MIN</code>.
+          Ogni <code>PUBLISH_INTERVAL</code> secondi emette un evento
+          <strong>BerthIncomingEvent</strong> con la lista ordinata per ETA crescente
+          delle navi dirette verso ciascuna banchina attiva.
+        </div>
+        <div class="tags">
+          <span class="tag tag-input">consume: ais.raw</span>
+          <span class="tag tag-sim">consume: ais_simulation.raw</span>
+          <span class="tag tag-output">publish: analytics_ais.raw</span>
+        </div>
+      </div>
+      <span class="arrow">→</span>
+    </div>
+  </a>
+
+  <!-- 9002 Bridge Components -->
+  <a class="card" href="http://87.26.178.190:9002" target="_blank">
+    <div class="card-top">
+      <div>
+        <div class="port-badge">:9002</div>
+      </div>
+      <div style="flex:1">
+        <div class="card-title">Bridge Components</div>
+        <div class="card-subtitle">bridge-components · analytics_ais.raw</div>
+        <div class="card-description">
+          Traccia il tempo di utilizzo (<strong>usage_seconds_total</strong>) di
+          ciascun componente di bordo installato sulle navi in movimento (SOG &gt; 0.1 nodi).
+          I componenti vengono recuperati via REST con cache TTL configurabile.
+          Pubblica un <strong>ComponentUsageEvent</strong> per ogni coppia
+          (MMSI, componente) attiva ogni <code>PUBLISH_INTERVAL_SEC</code> secondi.
+        </div>
+        <div class="tags">
+          <span class="tag tag-input">consume: ais.raw</span>
+          <span class="tag tag-sim">consume: ais_simulation.raw</span>
+          <span class="tag tag-output">publish: analytics_ais.raw</span>
+          <span class="tag tag-rest">GET /componente/by_mmsi/{mmsi}</span>
+        </div>
+      </div>
+      <span class="arrow">→</span>
+    </div>
+  </a>
+
+  <!-- 9003 Decoder AIS FastStream -->
+  <a class="card" href="http://87.26.178.190:9003" target="_blank">
+    <div class="card-top">
+      <div>
+        <div class="port-badge">:9003</div>
+      </div>
+      <div style="flex:1">
+        <div class="card-title">Decoder AIS FastStream</div>
+        <div class="card-subtitle">decoder-ais-faststream · ais_decoded.raw / ais_decoded_simulation.raw</div>
+        <div class="card-description">
+          Decodifica i frame NMEA/AIVDM grezzi (ITU-R M.1371) tramite <code>pyais</code>
+          e normalizza il risultato in eventi <strong>AisDecodedEvent</strong> strutturati
+          con posizione, SOG, COG, tipo messaggio AIS e payload statico (Tipo 5).
+          Gestisce messaggi multipart con buffer a coda TTL 120s.
+          Due istanze separate: <em>main</em> (AIS reale) e <em>sim</em> (simulazione).
+        </div>
+        <div class="tags">
+          <span class="tag tag-input">consume: ais.raw</span>
+          <span class="tag tag-sim">consume: ais_simulation.raw</span>
+          <span class="tag tag-output">publish: ais_decoded.raw</span>
+          <span class="tag tag-output">publish: ais_decoded_simulation.raw</span>
+        </div>
+      </div>
+      <span class="arrow">→</span>
+    </div>
+  </a>
+
+  <!-- 9004 Bridge Arrivo -->
+  <a class="card" href="http://87.26.178.190:9004" target="_blank">
+    <div class="card-top">
+      <div>
+        <div class="port-badge">:9004</div>
+      </div>
+      <div style="flex:1">
+        <div class="card-title">Bridge Arrivo</div>
+        <div class="card-subtitle">bridge-arrivo · REST PATCH /assegnazione/{id}/stato</div>
+        <div class="card-description">
+          Rileva l'arrivo della nave a destinazione tramite geofencing haversine
+          (raggio <code>GEOFENCE_RADIUS_M</code>). Implementa una state machine
+          per nave: <em>navigating → arriving → arrived</em>.
+          Dopo <code>ARRIVAL_CONFIRM_COUNT</code> check consecutivi all'interno del
+          geofence, chiama il backend REST per segnare l'assegnazione come
+          <strong>COMPLETATA</strong>. Nessun output su Kafka — l'unico effetto
+          è la chiamata REST.
+        </div>
+        <div class="tags">
+          <span class="tag tag-input">consume: ais.raw</span>
+          <span class="tag tag-sim">consume: ais_simulation.raw</span>
+          <span class="tag tag-rest">PATCH /assegnazione/{id}/stato</span>
+          <span class="tag tag-rest">GET /percorso/by_mmsi/{mmsi}</span>
+        </div>
+      </div>
+      <span class="arrow">→</span>
+    </div>
+  </a>
+
+</div>
+
+<footer>
+  AIS Analytics Platform &mdash; AsyncAPI 3.0 &mdash; FastStream 0.6.7
+</footer>
+
+</body>
+</html>

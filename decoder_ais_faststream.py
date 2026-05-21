@@ -4,111 +4,114 @@ AIS Decoder FastStream Worker
 
 Descrizione
 -----------
-Questo modulo implementa un worker FastStream che consuma messaggi AIS grezzi
-(formato NMEA/AIVDM) da topic Kafka e pubblica i messaggi decodificati in formato JSON
-sui rispettivi topic di output.
+Worker FastStream di decodifica messaggi AIS NMEA/AIVDM. Consuma messaggi grezzi
+dai topic Kafka ``ais.raw`` e ``ais_simulation.raw``, decodifica i frame con la
+libreria ``pyais`` e pubblica eventi JSON strutturati sui topic
+``ais_decoded.raw`` e ``ais_decoded_simulation.raw``.
 
-Architettura del Flusso Dati
-----------------------------
-::
+Ecosistema Event Bus
+--------------------
+Di seguito la mappa completa dei producer/consumer per ogni topic::
 
-    ┌─────────────────────┐         ┌──────────────────────┐         ┌─────────────────────────┐
-    │     ais.raw         │ ──────► │  AIS Decoder Worker  │ ──────► │   ais_decoded.raw       │
-    │  (NMEA grezzo)      │         │                      │         │   (JSON decodificato)   │
-    └─────────────────────┘         │  - Normalizzazione   │         └─────────────────────────┘
-                                    │  - Gestione multipart│
-    ┌─────────────────────┐         │  - Decodifica pyais  │         ┌─────────────────────────┐
-    │  ais_simulation.raw │ ──────► │  - Pubblicazione     │ ──────► │ais_decoded_simulation.raw│
-    │  (NMEA grezzo)      │         │                      │         │   (JSON decodificato)   │
-    └─────────────────────┘         └──────────────────────┘         └─────────────────────────┘
+                        ┌─────────────────────────────────────────────────────────────────┐
+                        │                    KAFKA EVENT BUS                              │
+                        └─────────────────────────────────────────────────────────────────┘
 
-Topic Kafka
------------
-**Input:**
-    - ``ais.raw``: Messaggi AIS reali in formato NMEA
-    - ``ais_simulation.raw``: Messaggi AIS simulati in formato NMEA
+   [AIS Receiver HW]                                                   [Backend / Dashboard]
+    AIS Connector  ──►  ais.raw  ──┬──► decoder-ais-main ──► ais_decoded.raw  ──►  consumer
+                                   ├──► bridge-banchina    (berth ETA analytics)
+                                   ├──► bridge-components  (component usage tracking)
+                                   ├──► bridge-delta-eta   (ETA delta calculation)
+                                   └──► bridge-arrivo      (arrival geofencing)
 
-**Output:**
-    - ``ais_decoded.raw``: Messaggi AIS reali decodificati in JSON
-    - ``ais_decoded_simulation.raw``: Messaggi AIS simulati decodificati in JSON
+   [Simulator]                                                         [Backend / Dashboard]
+    AIS Sim  ──►  ais_simulation.raw  ──┬──► decoder-ais-sim ──► ais_decoded_simulation.raw ──► consumer
+                                        ├──► bridge-banchina
+                                        ├──► bridge-components
+                                        ├──► bridge-delta-eta
+                                        └──► bridge-arrivo
 
-Modalità Operative (DECODER_MODE)
-----------------------------------
-Il decoder può essere avviato in tre modalità tramite la variabile d'ambiente ``DECODER_MODE``:
+Topic Kafka — Dettaglio
+-----------------------
++------------------------------+---------------------------+--------------------------------------+
+| Topic                        | Producer(s)               | Consumer(s)                          |
++==============================+===========================+======================================+
+| ais.raw                      | AIS Receiver / Connector  | decoder-ais-main,                    |
+|                              |                           | bridge-banchina,                     |
+|                              |                           | bridge-components,                   |
+|                              |                           | bridge-delta-eta,                    |
+|                              |                           | bridge-arrivo                        |
++------------------------------+---------------------------+--------------------------------------+
+| ais_simulation.raw           | AIS Simulator             | decoder-ais-sim,                     |
+|                              |                           | bridge-banchina,                     |
+|                              |                           | bridge-components,                   |
+|                              |                           | bridge-delta-eta,                    |
+|                              |                           | bridge-arrivo                        |
++------------------------------+---------------------------+--------------------------------------+
+| ais_decoded.raw              | decoder-ais-main          | Backend applicativo, dashboard,      |
+|                              | (questo servizio)         | client websocket (navi reali)        |
++------------------------------+---------------------------+--------------------------------------+
+| ais_decoded_simulation.raw   | decoder-ais-sim           | Backend applicativo, dashboard,      |
+|                              | (questo servizio)         | client websocket (simulazione)       |
++------------------------------+---------------------------+--------------------------------------+
 
-- ``all``: Ascolta entrambi i topic (default)
-- ``main``: Ascolta solo ``ais.raw`` (dati reali)
-- ``sim``: Ascolta solo ``ais_simulation.raw`` (simulazione)
+Caratteristiche della Messaggistica
+------------------------------------
+**Input (ais.raw / ais_simulation.raw)**
 
-In produzione vengono eseguiti due container separati (main + sim) per isolare
-i loop asincroni ed evitare contesa tra traffico reale e simulato.
+- Formato: frame NMEA/AIVDM in testo ASCII, es. ``!AIVDM,1,1,,B,15N4cJ`000rk3HH,0*37``
+- Frequenza reale: continua, ~0.3-2 msg/sec per nave attiva nell'area
+- Frequenza simulata: configurabile, tipicamente 1-10 msg/sec per nave
+- Chiave Kafka: assente o byte arbitrari
+- Payload: bytes UTF-8 (stringa NMEA) oppure JSON wrapper da Kafka Connect
+  (es. ``{"fields": {"value": "!AIVDM,..."}}`` )
+- Messaggi multipart: i Type 5 arrivano come 2 frammenti separati su Kafka
+  (buffer intra-worker) oppure bundled ``\\n``-separated in un unico messaggio
 
-Formato Messaggi NMEA/AIVDM
----------------------------
-I messaggi AIVDM seguono il formato::
+**Output (ais_decoded.raw / ais_decoded_simulation.raw)**
 
-    !AIVDM,1,1,,B,15N4cJ`000rk3HH@1T7q@?v00000,0*37
+- Formato: JSON (AisDecodedEvent serializzato)
+- Latenza decodifica: < 50 ms tipico, < 500 ms nel 99° percentile
+- Chiave Kafka: MMSI in bytes → ordine garantito per-nave all'interno della stessa partizione
+- Retention: dipende dalla configurazione Kafka del cluster (default 7 giorni)
 
-    Dove:
-    - Campo 1: Tipo messaggio (AIVDM)
-    - Campo 2: Numero totale di frammenti (per messaggi multipart)
-    - Campo 3: Numero del frammento corrente
-    - Campo 4: ID sequenza (per messaggi multipart)
-    - Campo 5: Canale radio (A o B)
-    - Campo 6: Payload codificato (6-bit ASCII)
-    - Campo 7: Bit di riempimento + checksum
+Modalità Operative
+------------------
+Variabile d'ambiente ``DECODER_MODE``:
+
++-------+--------------------------------------------------+---------------------------------+
+| Valore | Subscriber attivi                               | Uso tipico                      |
++=======+==================================================+=================================+
+| all   | ais.raw + ais_simulation.raw                    | Sviluppo / test locale          |
++-------+--------------------------------------------------+---------------------------------+
+| main  | solo ais.raw                                    | Container produzione AIS reale  |
++-------+--------------------------------------------------+---------------------------------+
+| sim   | solo ais_simulation.raw                         | Container dedicato simulazione  |
++-------+--------------------------------------------------+---------------------------------+
+
+In produzione vengono eseguiti **due container separati** (``decoder-ais-main`` e
+``decoder-ais-sim``) per isolare i loop asincroni ed eliminare la contesa di
+risorse tra traffico reale e simulato.
 
 Gestione Messaggi Multipart
 ---------------------------
-Alcuni messaggi AIS (es. Tipo 5 - dati statici nave) sono troppo lunghi
-per un singolo messaggio NMEA e vengono suddivisi in più frammenti.
+I messaggi AIS Tipo 5 (dati statici nave) superano la dimensione massima NMEA
+e vengono divisi in 2 frammenti. Questo worker gestisce due scenari:
 
-Il buffer multipart usa una **coda per chiave** ``(topic, canale, num_frammenti)``
-anziché il campo ``seq`` come discriminatore: il seq è un digit 0-9 riutilizzato
-da tutti i vascelli sullo stesso canale e causa collisioni con più navi attive.
+1. **Bundled** — Il simulatore invia entrambi i frammenti concatenati con ``\\n``
+   in un unico messaggio Kafka. → Decodifica diretta con pyais multipart.
+2. **Sequenziale** — I due frammenti arrivano come messaggi Kafka separati.
+   → Buffer a coda indicizzato per ``(topic, canale_radio, n_frammenti)``.
+   Frammenti non ricongiunti entro ``MULTIPART_TTL_SEC`` (120s) vengono scartati.
 
-Due percorsi di ricomposizione:
-1. **Bundled** (frammenti in un unico messaggio separati da ``\\n``): decodifica
-   nativa pyais multipart senza buffer.
-2. **Sequenziale** (frammenti in messaggi Kafka separati): buffer a coda con
-   TTL di ``MULTIPART_TTL_SEC`` secondi.
-
-Tipi Messaggi AIS
------------------
-I tipi più comuni gestiti:
-
-+----------+------------------------------------------+
-| Tipo     | Descrizione                              |
-+==========+==========================================+
-| 1, 2, 3  | Class A - Rapporto posizione             |
-+----------+------------------------------------------+
-| 4        | Base Station Report                      |
-+----------+------------------------------------------+
-| 5        | Class A - Dati statici e di viaggio      |
-+----------+------------------------------------------+
-| 14       | Safety-related broadcast                 |
-+----------+------------------------------------------+
-| 18       | Class B CS - Rapporto posizione          |
-+----------+------------------------------------------+
-| 21       | Aid-to-Navigation Report                 |
-+----------+------------------------------------------+
-| 24       | Class B CS - Dati statici                |
-+----------+------------------------------------------+
+La coda per chiave evita le collisioni causate dal campo ``seq`` (digit 0-9
+condiviso tra tutti i vascelli sullo stesso canale: riutilizzato ogni 10 navi).
 
 Dipendenze
 ----------
 - ``faststream``: Framework per streaming Kafka
-- ``pyais``: Libreria per decodifica messaggi AIS
-- ``pydantic``: Validazione e serializzazione dati
-
-Note per Sviluppatori
----------------------
-- I publisher stub decorati con ``@broker.publisher`` servono per generare
-  la documentazione AsyncAPI automatica e non contengono logica runtime
-- Il buffer multipart viene pulito automaticamente ogni 10 secondi (TTL 120s)
-- I messaggi con errori di decodifica vengono loggati ma non bloccano il flusso
-- La chiave di partizione Kafka è il MMSI: tutti i messaggi della stessa nave
-  finiscono nella stessa partizione → ordine garantito per nave
+- ``pyais``: Libreria per decodifica messaggi AIS (ITU-R M.1371)
+- ``pydantic``: Validazione e serializzazione dati / schema AsyncAPI
 
 Autore: Team AIS Analytics
 Versione: 2.1.0
@@ -125,15 +128,15 @@ import operator
 import os
 import time
 from functools import reduce
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
+from faststream.specification import AsyncAPI, Contact, ExternalDocs, Tag
 from pyais import decode as ais_decode
 from pydantic import BaseModel, Field
 import logging
 
-# Riduce la verbosità dei log FastStream per evitare rumore nei log di produzione
 logging.getLogger("faststream").setLevel(logging.WARNING)
 
 
@@ -145,22 +148,22 @@ BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:29092")
 """str: Indirizzo del cluster Kafka (formato: host:porta). Default: localhost:29092"""
 
 DECODER_MODE = os.getenv("DECODER_MODE", "all")
-"""str: Modalità decoder: 'all' | 'main' | 'sim'"""
+"""str: Modalità decoder: 'all' | 'main' | 'sim'. Controlla quali subscriber vengono registrati."""
 
 MAIN_INPUT_TOPIC = "ais.raw"
-"""str: Topic per messaggi AIS reali grezzi"""
+"""str: Topic Kafka per messaggi AIS reali in formato NMEA grezzo."""
 
 SIM_INPUT_TOPIC = "ais_simulation.raw"
-"""str: Topic per messaggi AIS simulati grezzi"""
+"""str: Topic Kafka per messaggi AIS simulati in formato NMEA grezzo."""
 
 MAIN_OUTPUT_TOPIC = "ais_decoded.raw"
-"""str: Topic per messaggi AIS reali decodificati"""
+"""str: Topic Kafka per messaggi AIS reali decodificati in JSON."""
 
 SIM_OUTPUT_TOPIC = "ais_decoded_simulation.raw"
-"""str: Topic per messaggi AIS simulati decodificati"""
+"""str: Topic Kafka per messaggi AIS simulati decodificati in JSON."""
 
 MULTIPART_TTL_SEC: float = 120.0
-"""float: TTL dei frammenti multipart nel buffer (secondi)."""
+"""float: TTL (secondi) dei frammenti multipart nel buffer prima dello scarto."""
 
 
 # =============================================================================
@@ -168,185 +171,342 @@ MULTIPART_TTL_SEC: float = 120.0
 # =============================================================================
 
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
-"""KafkaBroker: Istanza del broker Kafka per comunicazione pub/sub"""
 
-app = FastStream(
+_spec = AsyncAPI(
     broker,
     title="AIS Decoder FastStream",
     version="2.1.0",
     description=(
-        "Worker di decodifica messaggi AIS NMEA/AIVDM. "
-        "Consuma messaggi grezzi da ais.raw e ais_simulation.raw, "
-        "decodifica con pyais e pubblica JSON strutturati su ais_decoded.raw "
-        "e ais_decoded_simulation.raw. Supporta modalità multi-istanza tramite "
-        "DECODER_MODE (main | sim | all)."
+        "**Worker di decodifica messaggi AIS NMEA/AIVDM.**\n\n"
+        "Consuma frame grezzi da `ais.raw` e `ais_simulation.raw`, decodifica con **pyais** "
+        "(ITU-R M.1371) e pubblica eventi JSON su `ais_decoded.raw` e "
+        "`ais_decoded_simulation.raw`.\n\n"
+        "In produzione vengono eseguiti due container separati:\n"
+        "- `decoder-ais-main` — `DECODER_MODE=main`, processa solo AIS reale\n"
+        "- `decoder-ais-sim` — `DECODER_MODE=sim`, processa solo simulazione\n\n"
+        "**Chiave di partizione Kafka:** MMSI in bytes → ordine garantito per nave.\n\n"
+        "**Latenza tipica:** < 50 ms end-to-end (normalizzazione + decodifica pyais + publish)."
     ),
+    tags=[
+        Tag(
+            name="Decodifica AIS",
+            description=(
+                "Operazioni di normalizzazione NMEA, ricomposizione frame multipart "
+                "e decodifica payload AIS in JSON strutturato."
+            ),
+        ),
+        Tag(
+            name="AIS Reale",
+            description=(
+                "Flusso dati AIS reali provenienti dal ricevitore hardware. "
+                "Topic: `ais.raw` → `ais_decoded.raw`."
+            ),
+        ),
+        Tag(
+            name="AIS Simulazione",
+            description=(
+                "Flusso dati AIS simulati. "
+                "Topic: `ais_simulation.raw` → `ais_decoded_simulation.raw`."
+            ),
+        ),
+    ],
+    contact=Contact(name="Team AIS Analytics"),
 )
-"""FastStream: Applicazione principale FastStream"""
+
+app = FastStream(broker, specification=_spec)
 
 
 # =============================================================================
-# MODELLI PYDANTIC (Schema AsyncAPI)
+# MODELLI PYDANTIC — SCHEMA ASYNCAPI
 # =============================================================================
 
 class AisPositionPayload(BaseModel):
     """
-    Campi payload per messaggi di posizione AIS (Tipo 1, 2, 3, 18).
+    Payload decodificato per messaggi di posizione AIS.
+
+    Presente nel campo ``payload`` di ``AisDecodedEvent`` quando
+    ``msg_type`` è **1, 2, 3** (Class A position report) o **18** (Class B CS position).
+
+    I messaggi di posizione sono i più frequenti: ogni nave attiva li trasmette
+    ogni **2–10 secondi** (Class A) o **30 secondi** (Class B).
 
     Attributes
     ----------
-    * `msg_type` : int - Tipo messaggio AIS
-    * `mmsi` : str - MMSI nave (9 cifre)
-    * `status` : int, optional - Stato navigazione (0=in rotta, 1=fermo in porto, 5=ormeggiato, etc.)
-    * `turn` : float, optional - Velocità di virata ROT in gradi/min
-    * `speed` : float, optional - Velocità SOG (Speed Over Ground) in nodi
-    * `accuracy` : bool, optional - Accuratezza posizione GPS (true=<10m)
-    * `lon` : float, optional - Longitudine in gradi decimali (negativo=Ovest)
-    * `lat` : float, optional - Latitudine in gradi decimali (negativo=Sud)
-    * `course` : float, optional - Rotta COG (Course Over Ground) in gradi (0-360)
-    * `heading` : int, optional - Rotta prua HDG in gradi (0-359, 511=non disponibile)
-    * `second` : int, optional - Secondi UTC del fix posizione
-    * `maneuver` : int, optional - Indicatore manovra speciale (0=n/a, 1=manovra speciale, 2=non def.)
-    * `raim` : bool, optional - Stato RAIM (Receiver Autonomous Integrity Monitoring)
-    * `radio` : int, optional - Informazione radio/stato SOTDMA
+    * `msg_type` : int
+        Tipo messaggio AIS:
+        - 1 = Class A position report (scheduled)
+        - 2 = Class A position report (assigned)
+        - 3 = Class A position report (interrogated)
+        - 18 = Class B CS position report
+    * `mmsi` : str
+        Maritime Mobile Service Identity — identificatore univoco a 9 cifre.
+        Assegnato dalla ITU per ogni stazione radio navale.
+    * `status` : int, optional
+        Stato di navigazione AIS (0–15):
+        - 0 = In navigazione a motore
+        - 1 = Alla fonda
+        - 2 = Non in governo
+        - 3 = Manovrabilità ridotta
+        - 4 = Vincolata dal pescaggio
+        - 5 = Ormeggiata
+        - 6 = In secco
+        - 7 = Pesca in corso
+        - 8 = In navigazione a vela
+        - 15 = Non definito / default
+    * `turn` : float, optional
+        Rate of Turn (ROT) in gradi/minuto.
+        Positivo = virata a dritta, negativo = virata a sinistra.
+        -128 = nessun sensore ROT disponibile.
+    * `speed` : float, optional
+        Speed Over Ground (SOG) in nodi. Risoluzione: 0.1 nodi. Max: 102.2 nodi.
+    * `accuracy` : bool, optional
+        Accuratezza posizione: ``true`` = < 10 m (DGPS), ``false`` = > 10 m.
+    * `lon` : float, optional
+        Longitudine in gradi decimali (negativo = Ovest). Precisione: ~11 m.
+    * `lat` : float, optional
+        Latitudine in gradi decimali (negativo = Sud). Precisione: ~11 m.
+    * `course` : float, optional
+        Course Over Ground (COG) in gradi (0.0–359.9). 360.0 = non disponibile.
+    * `heading` : int, optional
+        True Heading (HDG) in gradi (0–359). 511 = non disponibile.
+    * `second` : int, optional
+        Secondi UTC del fix posizione (0–59). 60 = timestamp non disponibile.
+    * `maneuver` : int, optional
+        Indicatore manovra speciale: 0 = N/A, 1 = manovra speciale, 2 = non definito.
+    * `raim` : bool, optional
+        Receiver Autonomous Integrity Monitoring flag.
+        ``true`` = RAIM attivo (controllo integrità GPS).
+    * `radio` : int, optional
+        Informazione radio / stato SOTDMA (Self-Organized TDMA).
+
+    Examples
+    --------
+    ::
+
+        {
+            "msg_type": 1,
+            "mmsi": "247123456",
+            "status": 0,
+            "turn": 0,
+            "speed": 12.3,
+            "accuracy": true,
+            "lon": 14.267,
+            "lat": 40.851,
+            "course": 95.0,
+            "heading": 94,
+            "second": 22,
+            "maneuver": 0,
+            "raim": false,
+            "radio": 49152
+        }
     """
     msg_type: int = Field(..., description="Tipo messaggio AIS (1, 2, 3 o 18)")
-    mmsi: str = Field(..., description="MMSI nave (9 cifre)")
-    status: Optional[int] = Field(None, description="Stato navigazione AIS (0-15)")
-    turn: Optional[float] = Field(None, description="Velocità di virata ROT (gradi/min)")
-    speed: Optional[float] = Field(None, description="Velocità SOG in nodi")
-    accuracy: Optional[bool] = Field(None, description="Accuratezza GPS (true=<10m, false=DGPS/>10m)")
-    lon: Optional[float] = Field(None, description="Longitudine gradi decimali")
-    lat: Optional[float] = Field(None, description="Latitudine gradi decimali")
-    course: Optional[float] = Field(None, description="Rotta COG in gradi (0-360)")
-    heading: Optional[int] = Field(None, description="Rotta prua HDG in gradi (0-359, 511=N/A)")
-    second: Optional[int] = Field(None, description="Secondi UTC fix posizione")
-    maneuver: Optional[int] = Field(None, description="Indicatore manovra speciale (0-2)")
-    raim: Optional[bool] = Field(None, description="RAIM flag")
-    radio: Optional[int] = Field(None, description="Info radio / stato SOTDMA")
+    mmsi: str = Field(..., description="MMSI nave — identificatore univoco 9 cifre (ITU)")
+    status: Optional[int] = Field(None, description="Stato navigazione AIS (0–15, vedi spec ITU-R M.1371)")
+    turn: Optional[float] = Field(None, description="Rate of Turn ROT (gradi/min). -128 = sensore assente")
+    speed: Optional[float] = Field(None, description="Speed Over Ground SOG (nodi, risoluzione 0.1)")
+    accuracy: Optional[bool] = Field(None, description="Accuratezza GPS: true = DGPS <10m, false = >10m")
+    lon: Optional[float] = Field(None, description="Longitudine gradi decimali (negativo = Ovest)")
+    lat: Optional[float] = Field(None, description="Latitudine gradi decimali (negativo = Sud)")
+    course: Optional[float] = Field(None, description="Course Over Ground COG (0.0–359.9°, 360.0 = N/A)")
+    heading: Optional[int] = Field(None, description="True Heading HDG (0–359°, 511 = N/A)")
+    second: Optional[int] = Field(None, description="Secondi UTC del fix posizione (0–59, 60 = N/A)")
+    maneuver: Optional[int] = Field(None, description="Indicatore manovra: 0=N/A, 1=speciale, 2=non def.")
+    raim: Optional[bool] = Field(None, description="RAIM flag: true = controllo integrità GPS attivo")
+    radio: Optional[int] = Field(None, description="Info radio / stato SOTDMA/ITDMA")
 
 
 class AisStaticPayload(BaseModel):
     """
-    Campi payload per messaggi dati statici e di viaggio AIS (Tipo 5).
+    Payload decodificato per messaggi di dati statici e di viaggio AIS.
+
+    Presente nel campo ``payload`` di ``AisDecodedEvent`` quando
+    ``msg_type`` è **5** (Class A static and voyage related data).
+
+    I messaggi Tipo 5 sono trasmessi ogni **6 minuti** circa e contengono
+    informazioni identificative della nave e della missione corrente.
+    Sono messaggi **multipart** (2 frame NMEA): il worker li ricompone prima
+    della decodifica.
 
     Attributes
     ----------
-    * `msg_type` : int - Tipo messaggio AIS (5)
-    * `mmsi` : str - MMSI nave (9 cifre)
-    * `imo` : str, optional - Numero IMO nave (7 cifre)
-    * `callsign` : str, optional - Indicativo di chiamata radio (max 7 car.)
-    * `shipname` : str, optional - Nome della nave (max 20 car.)
-    * `shiptype` : int, optional - Tipo nave (codice ITU-R M.1371, 0-99)
-    * `to_bow` : int, optional - Distanza antenna-prua in metri
-    * `to_stern` : int, optional - Distanza antenna-poppa in metri
-    * `to_port` : int, optional - Distanza antenna-sinistra in metri
-    * `to_starboard` : int, optional - Distanza antenna-dritta in metri
-    * `epfd` : int, optional - Tipo dispositivo EPFD (1=GPS, 2=GLONASS, etc.)
-    * `eta_month` : int, optional - ETA mese (1-12, 0=non disponibile)
-    * `eta_day` : int, optional - ETA giorno (1-31)
-    * `eta_hour` : int, optional - ETA ora UTC (0-23)
-    * `eta_minute` : int, optional - ETA minuti (0-59)
-    * `draught` : float, optional - Pescaggio massimo in metri (0.1 risoluzione)
-    * `destination` : str, optional - Destinazione dichiarata (max 20 car.)
-    * `dte` : int, optional - DTE Data Terminal Equipment (0=disponibile)
+    * `msg_type` : int — Tipo messaggio AIS (5)
+    * `mmsi` : str — MMSI nave (9 cifre)
+    * `imo` : str, optional
+        Numero IMO (International Maritime Organization) — 7 cifre, univoco per scafo.
+        Invariato durante tutta la vita della nave.
+    * `callsign` : str, optional
+        Indicativo di chiamata radio — max 7 caratteri alfanumerici.
+        Assegnato dall'autorità di telecomunicazioni dello Stato di bandiera.
+    * `shipname` : str, optional
+        Nome della nave — max 20 caratteri (padding con spazi).
+    * `shiptype` : int, optional
+        Tipo nave (codice ITU-R M.1371 Tabella 50, 0–99):
+        - 0 = Non disponibile
+        - 30 = Pesca
+        - 36 = Vela
+        - 37 = Imbarcazione da diporto
+        - 50 = Pilotina
+        - 60–69 = Passeggeri
+        - 70–79 = Cargo
+        - 80–89 = Tanker
+        - 90–99 = Altro
+    * `to_bow` : int, optional — Distanza trasponditore–prua (metri)
+    * `to_stern` : int, optional — Distanza trasponditore–poppa (metri)
+    * `to_port` : int, optional — Distanza trasponditore–sinistra (metri)
+    * `to_starboard` : int, optional — Distanza trasponditore–dritta (metri)
+    * `epfd` : int, optional
+        Tipo dispositivo EPFD (Electronic Position Fixing Device):
+        - 1 = GPS, 2 = GLONASS, 3 = GPS+GLONASS, 4 = Loran-C, 5 = Chayka, 6 = Integrated
+    * `eta_month` : int, optional — ETA mese (1–12, 0 = non disponibile)
+    * `eta_day` : int, optional — ETA giorno (1–31)
+    * `eta_hour` : int, optional — ETA ora UTC (0–23)
+    * `eta_minute` : int, optional — ETA minuti (0–59)
+    * `draught` : float, optional — Pescaggio massimo corrente (metri, risoluzione 0.1 m)
+    * `destination` : str, optional — Destinazione dichiarata (max 20 car., uppercase)
+    * `dte` : int, optional — Data Terminal Equipment: 0 = disponibile, 1 = non disponibile
+
+    Examples
+    --------
+    ::
+
+        {
+            "msg_type": 5,
+            "mmsi": "247123456",
+            "imo": "9876543",
+            "callsign": "IABCD",
+            "shipname": "NAVE ESEMPIO      ",
+            "shiptype": 70,
+            "to_bow": 80,
+            "to_stern": 20,
+            "to_port": 10,
+            "to_starboard": 10,
+            "epfd": 1,
+            "eta_month": 6,
+            "eta_day": 15,
+            "eta_hour": 14,
+            "eta_minute": 30,
+            "draught": 6.5,
+            "destination": "SALERNO         ",
+            "dte": 0
+        }
     """
-    msg_type: int = Field(..., description="Tipo messaggio AIS (5)")
-    mmsi: str = Field(..., description="MMSI nave (9 cifre)")
-    imo: Optional[str] = Field(None, description="Numero IMO nave")
-    callsign: Optional[str] = Field(None, description="Indicativo radio (max 7 car.)")
-    shipname: Optional[str] = Field(None, description="Nome nave (max 20 car.)")
-    shiptype: Optional[int] = Field(None, description="Tipo nave ITU (0-99)")
-    to_bow: Optional[int] = Field(None, description="Distanza antenna-prua (m)")
-    to_stern: Optional[int] = Field(None, description="Distanza antenna-poppa (m)")
-    to_port: Optional[int] = Field(None, description="Distanza antenna-sinistra (m)")
-    to_starboard: Optional[int] = Field(None, description="Distanza antenna-dritta (m)")
-    epfd: Optional[int] = Field(None, description="Tipo EPFD (1=GPS, 2=GLONASS, 3=GPS+GLONASS)")
-    eta_month: Optional[int] = Field(None, description="ETA mese (1-12)")
-    eta_day: Optional[int] = Field(None, description="ETA giorno (1-31)")
-    eta_hour: Optional[int] = Field(None, description="ETA ora UTC (0-23)")
-    eta_minute: Optional[int] = Field(None, description="ETA minuti (0-59)")
-    draught: Optional[float] = Field(None, description="Pescaggio massimo (m, risoluzione 0.1m)")
-    destination: Optional[str] = Field(None, description="Destinazione dichiarata (max 20 car.)")
-    dte: Optional[int] = Field(None, description="DTE (0=disponibile, 1=non disponibile)")
+    msg_type: int = Field(..., description="Tipo messaggio AIS (5 = Class A static & voyage)")
+    mmsi: str = Field(..., description="MMSI nave — identificatore univoco 9 cifre")
+    imo: Optional[str] = Field(None, description="Numero IMO (7 cifre) — univoco per scafo, invariato nel tempo")
+    callsign: Optional[str] = Field(None, description="Indicativo radio (max 7 car.) — assegnato dallo Stato di bandiera")
+    shipname: Optional[str] = Field(None, description="Nome nave (max 20 car., padding spazi)")
+    shiptype: Optional[int] = Field(None, description="Tipo nave ITU (0–99). 70–79=Cargo, 80–89=Tanker, 60–69=Passeggeri")
+    to_bow: Optional[int] = Field(None, description="Distanza trasponditore–prua (m)")
+    to_stern: Optional[int] = Field(None, description="Distanza trasponditore–poppa (m)")
+    to_port: Optional[int] = Field(None, description="Distanza trasponditore–sinistra (m)")
+    to_starboard: Optional[int] = Field(None, description="Distanza trasponditore–dritta (m)")
+    epfd: Optional[int] = Field(None, description="Tipo EPFD: 1=GPS, 2=GLONASS, 3=GPS+GLONASS, 4=Loran-C")
+    eta_month: Optional[int] = Field(None, description="ETA mese (1–12, 0 = N/A)")
+    eta_day: Optional[int] = Field(None, description="ETA giorno (1–31)")
+    eta_hour: Optional[int] = Field(None, description="ETA ora UTC (0–23)")
+    eta_minute: Optional[int] = Field(None, description="ETA minuti (0–59)")
+    draught: Optional[float] = Field(None, description="Pescaggio massimo corrente (m, risoluzione 0.1 m)")
+    destination: Optional[str] = Field(None, description="Destinazione dichiarata (max 20 car., uppercase)")
+    dte: Optional[int] = Field(None, description="DTE: 0 = disponibile, 1 = non disponibile")
 
 
 class AisDecodedEvent(BaseModel):
     """
-    Evento AIS decodificato pubblicato sui topic di output.
+    Evento AIS decodificato — schema pubblicato su ``ais_decoded.raw`` e
+    ``ais_decoded_simulation.raw``.
 
-    Questo è il formato standard per tutti i messaggi decodificati
-    pubblicati su ``ais_decoded.raw`` e ``ais_decoded_simulation.raw``.
+    Prodotto da questo worker per ogni messaggio NMEA decodificato con successo.
+    Il campo ``payload`` contiene tutti i campi restituiti da ``pyais`` (ITU-R M.1371):
+    il contenuto varia in base al tipo di messaggio.
 
-    Il campo ``payload`` contiene tutti i campi AIS decodificati da pyais.
-    Il contenuto varia in base al ``msg_type``:
+    Frequenza di produzione
+    -----------------------
+    - **Tipo 1/2/3** (posizione Class A): ogni 2–10 secondi per nave attiva
+    - **Tipo 18** (posizione Class B): ogni 30 secondi
+    - **Tipo 5** (dati statici): ogni 6 minuti circa
+    - **Altri tipi**: variabile
 
-    - **Tipo 1, 2, 3, 18**: Campi posizione (vedi ``AisPositionPayload``)
-    - **Tipo 5**: Campi statici e di viaggio (vedi ``AisStaticPayload``)
-    - **Altri tipi**: Campi specifici per tipo
+    Chiave di partizione Kafka
+    --------------------------
+    Il MMSI è usato come chiave di partizione → messaggi della stessa nave
+    vanno sempre nella stessa partizione → ordine cronologico garantito per-nave.
+
+    Routing per ``source``
+    ----------------------
+    - ``source = "ais.raw"`` → pubblicato su ``ais_decoded.raw`` (canale reale)
+    - ``source = "ais_simulation.raw"`` → pubblicato su ``ais_decoded_simulation.raw``
+
+    Payload per tipo messaggio
+    --------------------------
+    - **Tipo 1, 2, 3, 18** → campi posizione (vedi ``AisPositionPayload``)
+    - **Tipo 5** → campi statici e di viaggio (vedi ``AisStaticPayload``)
+    - **Tipo 4** (base station), **Tipo 14** (safety broadcast),
+      **Tipo 21** (aid-to-navigation), **Tipo 24** (Class B static):
+      campi specifici per tipo, struttura analoga
 
     Attributes
     ----------
-    * `type` : str - Tipo evento, sempre "ais_decoded"
-    * `msg_type` : int, optional - Tipo messaggio AIS originale (1-27)
-    * `mmsi` : str, optional - MMSI della nave (9 cifre)
-    * `payload` : dict - Payload completo con tutti i campi AIS decodificati
-    * `timestamp` : float - Timestamp Unix (secondi) della decodifica
-    * `source` : str - Topic sorgente del messaggio originale
+    * `type` : str — Tipo evento. Valore fisso: ``"ais_decoded"``
+    * `msg_type` : int, optional — Tipo messaggio AIS (1–27)
+    * `mmsi` : str, optional — MMSI nave (9 cifre)
+    * `payload` : dict — Tutti i campi AIS decodificati (dipendente da msg_type)
+    * `timestamp` : float — Unix timestamp (secondi) dell'istante di decodifica
+    * `source` : str — Topic Kafka sorgente del messaggio grezzo
 
     Examples
     --------
-    Messaggio di posizione (Tipo 1 - Class A)::
+    Posizione Class A (Tipo 1) — evento più frequente::
 
         {
             "type": "ais_decoded",
             "msg_type": 1,
-            "mmsi": "123456789",
+            "mmsi": "247123456",
             "payload": {
                 "msg_type": 1,
-                "mmsi": "123456789",
+                "mmsi": "247123456",
                 "status": 0,
                 "turn": 0,
-                "speed": 10.5,
+                "speed": 12.3,
                 "accuracy": true,
-                "lon": 9.123456,
-                "lat": 44.123456,
-                "course": 180.0,
-                "heading": 180,
-                "second": 30,
+                "lon": 14.267,
+                "lat": 40.851,
+                "course": 95.0,
+                "heading": 94,
+                "second": 22,
                 "maneuver": 0,
                 "raim": false,
-                "radio": 0
+                "radio": 49152
             },
-            "timestamp": 1670000000.0,
+            "timestamp": 1716288000.0,
             "source": "ais.raw"
         }
 
-    Dati statici nave (Tipo 5 - Class A Voyage)::
+    Dati statici nave (Tipo 5) — ogni ~6 minuti::
 
         {
             "type": "ais_decoded",
             "msg_type": 5,
-            "mmsi": "123456789",
+            "mmsi": "247123456",
             "payload": {
                 "msg_type": 5,
-                "mmsi": "123456789",
-                "imo": "1234567",
-                "callsign": "ABCD123",
+                "mmsi": "247123456",
+                "imo": "9876543",
+                "callsign": "IABCD",
                 "shipname": "NAVE ESEMPIO",
                 "shiptype": 70,
-                "destination": "PORTO X",
-                "eta_month": 3,
-                "eta_day": 15,
-                "eta_hour": 14,
-                "eta_minute": 30,
-                "draught": 5.2
+                "to_bow": 80, "to_stern": 20, "to_port": 10, "to_starboard": 10,
+                "epfd": 1,
+                "eta_month": 6, "eta_day": 15, "eta_hour": 14, "eta_minute": 30,
+                "draught": 6.5,
+                "destination": "SALERNO",
+                "dte": 0
             },
-            "timestamp": 1670000000.0,
+            "timestamp": 1716288360.0,
             "source": "ais.raw"
         }
 
-    Posizione Class B (Tipo 18)::
+    Posizione Class B simulata (Tipo 18)::
 
         {
             "type": "ais_decoded",
@@ -363,52 +523,95 @@ class AisDecodedEvent(BaseModel):
                 "heading": 95,
                 "raim": false
             },
-            "timestamp": 1670000000.0,
+            "timestamp": 1716288030.0,
             "source": "ais_simulation.raw"
         }
     """
-    type: str = Field("ais_decoded", description="Tipo evento (fisso: 'ais_decoded')")
-    msg_type: Optional[int] = Field(None, description="Tipo messaggio AIS (1-27)")
-    mmsi: Optional[str] = Field(None, description="MMSI nave (9 cifre)")
+    type: Literal["ais_decoded"] = Field(
+        "ais_decoded",
+        description="Tipo evento. Valore fisso: 'ais_decoded'.",
+    )
+    msg_type: Optional[int] = Field(
+        None,
+        description=(
+            "Tipo messaggio AIS (1–27). "
+            "Tipi più comuni: 1/2/3=posizione Class A, 5=dati statici, 18=posizione Class B."
+        ),
+    )
+    mmsi: Optional[str] = Field(
+        None,
+        description=(
+            "Maritime Mobile Service Identity — identificatore univoco nave (9 cifre). "
+            "Usato anche come chiave di partizione Kafka."
+        ),
+    )
     payload: Dict[str, Any] = Field(
         ...,
         description=(
-            "Payload AIS decodificato completo. "
-            "Campi variano per tipo: Tipo 1-3/18 → posizione+velocità (vedi AisPositionPayload), "
-            "Tipo 5 → dati statici+viaggio (vedi AisStaticPayload)."
+            "Payload AIS completo restituito da pyais (ITU-R M.1371). "
+            "Struttura dipendente da msg_type: "
+            "Tipo 1/2/3/18 → posizione (AisPositionPayload), "
+            "Tipo 5 → dati statici/viaggio (AisStaticPayload)."
         ),
     )
-    timestamp: float = Field(..., description="Timestamp Unix della decodifica (secondi)")
+    timestamp: float = Field(
+        ...,
+        description=(
+            "Unix timestamp (secondi) dell'istante di decodifica sul worker. "
+            "Non corrisponde al timestamp AIS originale del trasponditore."
+        ),
+    )
     source: str = Field(
-        ..., description="Topic sorgente: 'ais.raw' | 'ais_simulation.raw'"
+        ...,
+        description=(
+            "Topic Kafka sorgente del messaggio grezzo. "
+            "Valori: 'ais.raw' (reale) | 'ais_simulation.raw' (simulazione)."
+        ),
     )
 
 
-# -----------------------------------------------------------------------------
-# Publisher Stubs per documentazione AsyncAPI
-# -----------------------------------------------------------------------------
-# Queste funzioni sono stub vuoti che servono esclusivamente per la
-# generazione automatica della documentazione AsyncAPI. Non contengono
-# logica di runtime e NON devono essere rimosse.
+# =============================================================================
+# PUBLISHER STUBS — documentazione AsyncAPI
+# =============================================================================
+# Funzioni stub vuote: non contengono logica di runtime.
+# Usate da FastStream per generare automaticamente i canali di output
+# nella specifica AsyncAPI. Il tipo di ritorno definisce lo schema del messaggio.
 
-@broker.publisher(MAIN_OUTPUT_TOPIC)
+@broker.publisher(
+    MAIN_OUTPUT_TOPIC,
+    description=(
+        "Pubblica eventi `AisDecodedEvent` JSON su **`ais_decoded.raw`** per ogni frame "
+        "NMEA reale decodificato con successo da `ais.raw`.\n\n"
+        "**Chiave Kafka:** MMSI in bytes → ordine per-nave garantito.\n\n"
+        "**Consumer tipici di questo topic:**\n"
+        "- Backend applicativo (API REST / WebSocket)\n"
+        "- Dashboard real-time\n"
+        "- Sistemi di archivio / data lake\n\n"
+        "**Latenza tipica:** < 50 ms dalla ricezione del frame grezzo.\n\n"
+        "**Attivo quando:** `DECODER_MODE = all | main`."
+    ),
+)
 async def _doc_ais_decoded_main() -> AisDecodedEvent:
-    """
-    Publisher output topic principale.
-
-    Pubblica messaggi AIS reali decodificati da ``ais.raw``.
-    Attivo quando ``DECODER_MODE`` è ``all`` o ``main``.
-    """
+    """Publisher stub — ais_decoded.raw (canale AIS reale)."""
     ...
 
-@broker.publisher(SIM_OUTPUT_TOPIC)
-async def _doc_ais_decoded_sim() -> AisDecodedEvent:
-    """
-    Publisher output topic simulazione.
 
-    Pubblica messaggi AIS simulati decodificati da ``ais_simulation.raw``.
-    Attivo quando ``DECODER_MODE`` è ``all`` o ``sim``.
-    """
+@broker.publisher(
+    SIM_OUTPUT_TOPIC,
+    description=(
+        "Pubblica eventi `AisDecodedEvent` JSON su **`ais_decoded_simulation.raw`** per ogni "
+        "frame NMEA simulato decodificato con successo da `ais_simulation.raw`.\n\n"
+        "**Chiave Kafka:** MMSI in bytes → ordine per-nave garantito.\n\n"
+        "**Consumer tipici di questo topic:**\n"
+        "- Backend applicativo (visualizzazione simulazione)\n"
+        "- Dashboard simulazione real-time\n"
+        "- Testing e validazione algoritmi\n\n"
+        "**Frequenza:** dipende dalla velocità del simulatore (configurabile).\n\n"
+        "**Attivo quando:** `DECODER_MODE = all | sim`."
+    ),
+)
+async def _doc_ais_decoded_sim() -> AisDecodedEvent:
+    """Publisher stub — ais_decoded_simulation.raw (canale simulazione)."""
     ...
 
 
@@ -417,21 +620,34 @@ async def _doc_ais_decoded_sim() -> AisDecodedEvent:
 # =============================================================================
 
 state_lock = asyncio.Lock()
-"""asyncio.Lock: Lock per accesso thread-safe allo stato condiviso"""
+"""asyncio.Lock: Lock per accesso thread-safe al buffer multipart condiviso."""
 
 multipart_buffer: Dict[tuple, List] = {}
 """
 Dict[tuple, List[dict]]: Buffer a coda per ricomposizione messaggi NMEA multipart.
 
-Chiave: (topic, canale, num_frammenti_totali)
-Valore: lista di entry ``{"total": int, "parts": dict, "ts": float}``
+Chiave: ``(topic, canale_radio, num_frammenti_totali)``
+    - ``topic``: nome del topic Kafka sorgente
+    - ``canale_radio``: "A" o "B" (campo 5 NMEA)
+    - ``num_frammenti_totali``: numero di frammenti attesi (tipicamente 2 per Tipo 5)
 
-La coda per chiave permette di gestire correttamente più vascelli
-che usano lo stesso canale radio senza collisioni di seq ID.
+Valore: lista di entry in attesa per quella chiave::
+
+    [
+        {
+            "total": 2,           # frammenti totali
+            "parts": {1: "...", 2: "..."},  # indice → payload
+            "ts": 1716288000.0    # timestamp ultimo frammento (per TTL)
+        },
+        ...  # più entry per vascelli diversi sulla stessa chiave
+    ]
+
+La struttura a **coda per chiave** evita collisioni del campo ``seq`` (0-9,
+condiviso tra tutti i vascelli sullo stesso canale radio).
 """
 
 last_cleanup = time.time()
-"""float: Timestamp dell'ultima pulizia del buffer multipart"""
+"""float: Timestamp dell'ultima pulizia del buffer multipart."""
 
 
 # =============================================================================
@@ -439,56 +655,38 @@ last_cleanup = time.time()
 # =============================================================================
 
 def log(msg: str) -> None:
-    """
-    Stampa un messaggio di log con timestamp formattato.
-
-    Parameters
-    ----------
-    msg : str
-        Messaggio da loggare
-
-    Examples
-    --------
-    >>> log("Connessione Kafka stabilita")
-    [14:30:45] Connessione Kafka stabilita
-    """
+    """Stampa un messaggio di log con timestamp HH:MM:SS e flush immediato."""
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def normalize_nmea(raw_value) -> Optional[str]:
     """
-    Normalizza un messaggio NMEA grezzo in formato standard AIVDM.
+    Normalizza un messaggio NMEA grezzo in stringa AIVDM standard.
 
-    Gestisce diversi formati di input:
+    Gestisce i seguenti formati di input:
 
-    - **dict**: da FastStream auto-deserializzazione JSON
-      (es. ``{"fields": {"value": "!AIVDM,..."}}`` da simulazione)
-    - **bytes UTF-8**: da topic Kafka con encoding binario
-    - **str JSON wrapper**: da Kafka Connect (es. ``{"fields":{"value":"!AIVDM,..."}}`` )
-    - **str AIVDM diretto**: messaggi già in formato ``!AIVDM,...``
-    - **str con prefissi**: messaggi con caratteri extra prima del ``!``
+    1. **dict** — da FastStream che auto-deserializza JSON in ingresso
+       (tipico per ``ais_simulation.raw``):
+       ``{"fields": {"value": "!AIVDM,..."}}``
+    2. **bytes** — da topic Kafka con payload binario (encoding UTF-8/ASCII)
+    3. **str JSON wrapper** — da Kafka Connect:
+       ``{"fields": {"value": "!AIVDM,..."}}`` oppure ``{"value": "!AIVDM,..."}``
+    4. **str AIVDM diretto** — già in formato ``!AIVDM,...``
+    5. **str con prefissi** — caratteri extra prima del ``!`` (es. log con timestamp)
 
     Parameters
     ----------
     raw_value : dict | bytes | str
-        Messaggio grezzo in uno dei formati supportati
+        Messaggio grezzo in qualsiasi formato supportato.
 
     Returns
     -------
     str | None
-        Messaggio NMEA normalizzato (inizia con "!AIVDM")
-        o None se il parsing fallisce
-
-    Examples
-    --------
-    >>> normalize_nmea(b'!AIVDM,1,1,,B,15N4cJ`000rk3HH,0*37')
-    '!AIVDM,1,1,,B,15N4cJ`000rk3HH,0*37'
-
-    >>> normalize_nmea('{"fields":{"value":"!AIVDM,1,1,,B,15N4cJ`,0*37"}}')
-    '!AIVDM,1,1,,B,15N4cJ`,0*37'
+        Stringa NMEA normalizzata (inizia con ``!AIVDM``) oppure ``None``
+        se il formato non è riconoscibile o il parsing fallisce.
     """
     try:
-        # Gestione input dict (tipico da ais_simulation.raw deserializzato da FastStream)
+        # Gestione dict (FastStream auto-deserializza JSON da ais_simulation.raw)
         if isinstance(raw_value, dict):
             fields = raw_value.get("fields")
             if isinstance(fields, dict):
@@ -508,7 +706,7 @@ def normalize_nmea(raw_value) -> Optional[str]:
 
         raw_value = raw_value.strip()
 
-        # Gestione wrapper JSON (es. da Kafka Connect)
+        # JSON wrapper (es. Kafka Connect)
         if raw_value.startswith("{"):
             try:
                 data = json.loads(raw_value)
@@ -522,7 +720,6 @@ def normalize_nmea(raw_value) -> Optional[str]:
         if raw_value.startswith("!AIVDM"):
             return raw_value
 
-        # Cerca il marker "!" nel messaggio (per messaggi con prefissi)
         if "!" in raw_value:
             return raw_value[raw_value.find("!"):]
 
@@ -533,25 +730,17 @@ def normalize_nmea(raw_value) -> Optional[str]:
 
 def compute_checksum(body: str) -> str:
     """
-    Calcola il checksum NMEA per un messaggio.
-
-    Il checksum NMEA è calcolato come XOR di tutti i caratteri
-    tra "!" e "*" (esclusi).
+    Calcola il checksum NMEA (XOR di tutti i caratteri tra '!' e '*').
 
     Parameters
     ----------
     body : str
-        Corpo del messaggio NMEA (con o senza il prefisso "!")
+        Corpo del messaggio NMEA (con o senza il prefisso '!').
 
     Returns
     -------
     str
-        Checksum esadecimale a 2 cifre (es. "3F")
-
-    Examples
-    --------
-    >>> compute_checksum("AIVDM,1,1,,B,15N4cJ`000rk3HH,0")
-    '37'
+        Checksum esadecimale a 2 cifre maiuscole (es. '3F').
     """
     content = body[1:] if body.startswith("!") else body
     return f"{reduce(operator.xor, (ord(c) for c in content), 0):02X}"
@@ -559,42 +748,28 @@ def compute_checksum(body: str) -> str:
 
 def handle_multipart(topic: str, parts: list) -> Optional[str]:
     """
-    Gestisce la ricomposizione di messaggi AIS multipart (multi-sentence).
+    Ricompone messaggi AIS multipart da frammenti NMEA sequenziali.
 
-    I messaggi AIS tipo 5 (dati statici nave) e altri tipi lunghi vengono
-    suddivisi in più frammenti NMEA. Questa funzione raccoglie i frammenti
-    e li ricompone quando sono tutti disponibili.
-
-    Strategia buffer a coda per chiave ``(topic, canale, num_frammenti)``:
-    evita collisioni causate dal campo ``seq`` (digit 0-9 condiviso tra
-    tutti i vascelli sullo stesso canale). Con più navi attive, il seq
-    viene riutilizzato e causa mescolamento dei frammenti se usato come chiave.
+    Strategia a **coda per chiave** ``(topic, canale, num_frammenti)``:
+    - Ogni chiave mantiene una coda di entry in attesa di completamento.
+    - Evita collisioni del campo ``seq`` NMEA (digit 0-9 condiviso tra
+      tutti i vascelli sullo stesso canale radio).
+    - Con più navi attive che trasmettono Tipo 5 contemporaneamente,
+      l'approccio basato su ``seq`` produce mescolamento dei payload.
 
     Parameters
     ----------
     topic : str
-        Nome del topic Kafka sorgente (usato come parte della chiave buffer)
+        Nome del topic Kafka sorgente.
     parts : list
-        Lista dei campi del messaggio NMEA split per ","
-        Formato: [tipo, totale, indice, seq, canale, payload, ...]
+        Campi del messaggio NMEA dopo split per ",".
+        Struttura: ``[tipo, totale, indice, seq, canale, payload, fill+checksum]``
 
     Returns
     -------
     str | None
-        Messaggio NMEA ricomposto se tutti i frammenti sono disponibili,
-        altrimenti None (in attesa di altri frammenti)
-
-    Examples
-    --------
-    Primo frammento (ritorna None, in attesa del secondo)::
-
-        >>> handle_multipart("ais.raw", ["AIVDM", "2", "1", "3", "B", "55?MbV02...", "0"])
-        None
-
-    Secondo frammento (ritorna messaggio completo)::
-
-        >>> handle_multipart("ais.raw", ["AIVDM", "2", "2", "3", "B", "000000...", "2"])
-        '!AIVDM,1,1,,B,55?MbV02...000000...,0*XX'
+        Messaggio NMEA ricomposto (singola riga, checksum ricalcolato) se
+        tutti i frammenti sono disponibili, altrimenti ``None``.
     """
     try:
         total = int(parts[1])
@@ -607,17 +782,14 @@ def handle_multipart(topic: str, parts: list) -> Optional[str]:
 
         target_entry = None
         if index == 1:
-            # Nuovo messaggio multipart: crea entry e accoda
             target_entry = {"total": total, "parts": {}, "ts": time.time()}
             queue.append(target_entry)
         else:
-            # Frammento successivo: trova la entry più vecchia compatibile
             for entry in queue:
                 if index not in entry["parts"] and len(entry["parts"]) < entry["total"]:
                     target_entry = entry
                     break
             if target_entry is None:
-                # Nessuna entry compatibile (frammento orfano): crea nuova entry
                 target_entry = {"total": total, "parts": {}, "ts": time.time()}
                 queue.append(target_entry)
 
@@ -637,54 +809,60 @@ def handle_multipart(topic: str, parts: list) -> Optional[str]:
             return f"!{body}*{compute_checksum(body)}"
 
     except Exception as e:
-        log(f"[MULTIPART ERROR] Errore ricomposizione: {e}")
+        log(f"[MULTIPART ERROR] {e}")
 
     return None
 
 
-# Contatori diagnostici per monitorare throughput decoder
-_decode_count_main = 0
-_decode_count_sim = 0
-_decode_errors = 0
-_last_diag_ts = time.time()
+# =============================================================================
+# CONTATORI DIAGNOSTICI
+# =============================================================================
+
+_decode_count_main: int = 0
+_decode_count_sim: int = 0
+_decode_errors: int = 0
+_last_diag_ts: float = time.time()
+_publish_slow_count: int = 0
+_publish_total_time: float = 0.0
+_publish_count: int = 0
 
 
-async def _periodic_cleanup_loop():
+async def _periodic_cleanup_loop() -> None:
     """
-    Task periodico che pulisce il buffer multipart ogni 10 secondi
-    e logga statistiche diagnostiche ogni 30 secondi.
+    Task asincrono periodico: cleanup buffer multipart + diagnostica.
 
-    Eseguito come task asincrono indipendente (lanciato in on_startup),
-    NON chiamato per ogni messaggio. Questo elimina la contention
-    sul lock che rallentava il processing dei messaggi.
+    Avviato all'on_startup come task indipendente (non chiamato per messaggio).
 
-    Cleanup multipart:
-        Rimuove dai buffer le entry con timestamp più vecchio di
-        ``MULTIPART_TTL_SEC`` secondi (default 120s).
+    **Ogni 10 secondi:**
+    - Rimuove dal buffer multipart le entry con timestamp più vecchio di
+      ``MULTIPART_TTL_SEC`` (120 s). Frammenti orfani vengono scartati.
 
-    Diagnostica (ogni 30s):
-        Logga messaggi decodificati per canale, errori, dimensione
-        buffer multipart e statistiche latenza di publish.
+    **Ogni 30 secondi:**
+    - Logga statistiche diagnostiche:
+      messaggi decodificati (main/sim), errori, dimensione buffer multipart,
+      publish lenti (> 0.5 s), latenza media publish.
+    - Azzera i contatori per il prossimo ciclo.
     """
     global _last_diag_ts, _decode_count_main, _decode_count_sim, _decode_errors
     global _publish_slow_count, _publish_total_time, _publish_count
+
     while True:
         await asyncio.sleep(10)
         now = time.time()
 
-        # Cleanup buffer multipart stale (queue-based)
         async with state_lock:
             for qk, queue in list(multipart_buffer.items()):
-                queue[:] = [entry for entry in queue if now - entry["ts"] <= MULTIPART_TTL_SEC]
+                queue[:] = [e for e in queue if now - e["ts"] <= MULTIPART_TTL_SEC]
                 if not queue:
                     del multipart_buffer[qk]
 
-        # Diagnostica periodica ogni 30s
         if now - _last_diag_ts >= 30:
             avg_pub = (_publish_total_time / _publish_count * 1000) if _publish_count > 0 else 0
-            log(f"[DIAG] decoded main={_decode_count_main} sim={_decode_count_sim} "
+            log(
+                f"[DIAG] decoded main={_decode_count_main} sim={_decode_count_sim} "
                 f"errors={_decode_errors} multipart_buf={len(multipart_buffer)} "
-                f"pub_slow={_publish_slow_count} pub_avg={avg_pub:.1f}ms")
+                f"pub_slow={_publish_slow_count} pub_avg={avg_pub:.1f}ms"
+            )
             _decode_count_main = 0
             _decode_count_sim = 0
             _decode_errors = 0
@@ -698,64 +876,47 @@ async def _periodic_cleanup_loop():
 # LOGICA DI DECODIFICA E PUBBLICAZIONE
 # =============================================================================
 
-# Contatori per diagnostica publish
-_publish_slow_count = 0
-_publish_total_time = 0.0
-_publish_count = 0
-
 async def decode_and_publish(raw_value, source_topic: str, output_topic: str) -> None:
     """
-    Decodifica un messaggio AIS grezzo e lo pubblica sul topic di output.
+    Decodifica un messaggio AIS grezzo e pubblica l'evento sul topic di output.
 
-    Pipeline di elaborazione:
+    Pipeline:
 
-    1. **Normalizzazione**: Converti il raw_value in stringa NMEA valida
-    2. **Bundled multipart**: Se il messaggio contiene più righe (``\\n``-separated),
-       decodifica direttamente con pyais multipart senza buffer
-    3. **Buffer multipart**: Se frammento singolo con ``total > 1``,
-       accumula nel buffer e attendi gli altri frammenti
-    4. **Decodifica**: Chiama pyais in un thread executor (CPU-bound,
-       non blocca l'event loop asyncio)
-    5. **Pubblicazione**: Pubblica l'evento JSON su Kafka con chiave MMSI
-       per garantire ordine per-nave
+    1. **Normalizzazione** — ``normalize_nmea()`` converte qualsiasi formato
+       di input in una stringa AIVDM valida.
+    2. **Rilevamento bundled multipart** — se il messaggio contiene più righe
+       ``\\n``-separate, usa tutte le righe come argomenti per pyais (percorso
+       simulatore).
+    3. **Buffer multipart** — se il messaggio è un singolo frammento con
+       ``total > 1``, lo accumula nel buffer e attende i frammenti mancanti.
+    4. **Decodifica pyais** — eseguita in un thread executor (CPU-bound)
+       per non bloccare l'event loop asyncio.
+    5. **Pubblicazione** — costruisce l'evento JSON e lo pubblica su Kafka
+       con chiave MMSI. Timeout: 5 secondi. Publish > 0.5 s → warning.
 
     Parameters
     ----------
     raw_value : bytes | dict | str
-        Messaggio AIS grezzo (qualsiasi formato, normalizzato internamente)
+        Messaggio AIS grezzo in qualsiasi formato (normalizzato internamente).
     source_topic : str
-        Topic Kafka sorgente (``ais.raw`` | ``ais_simulation.raw``)
+        Topic Kafka sorgente (usato per il campo ``source`` dell'evento e
+        come dimensione del buffer multipart).
     output_topic : str
-        Topic Kafka destinazione (``ais_decoded.raw`` | ``ais_decoded_simulation.raw``)
-
-    Notes
-    -----
-    - Timeout publish: 5 secondi. Superato il timeout, incrementa ``_decode_errors``
-    - Publish lento (>0.5s): loggato come warning con latenza e MMSI
-    - Chiave partizione Kafka: MMSI in bytes → ordine garantito per nave
+        Topic Kafka di destinazione per l'evento decodificato.
     """
     global _publish_slow_count, _publish_total_time, _publish_count
 
-    # Step 1: Normalizzazione NMEA
     nmea = normalize_nmea(raw_value)
-
     if not nmea or not nmea.startswith("!"):
         return
 
-    # Step 2b: Gestione messaggi multi-riga (frammenti bundled in un unico messaggio Kafka)
-    # Il simulatore invia tutti i frammenti Type 5 concatenati con \n in un singolo messaggio.
-    # In questo caso decodifichiamo direttamente con pyais multipart senza buffer.
     lines = [l.strip() for l in nmea.split("\n") if l.strip().startswith("!AIVDM")]
     if len(lines) > 1:
-        # Tutti i frammenti sono già presenti: decodifica nativa pyais multipart
         decode_args = tuple(lines)
     else:
-        # Singola riga NMEA: gestione standard (single-part o buffer multipart)
         final = None
         parts = nmea.split(",")
-
         try:
-            # Step 3: Gestione multipart (se totale frammenti > 1)
             if len(parts) > 5 and int(parts[1]) > 1:
                 async with state_lock:
                     final = handle_multipart(source_topic, parts)
@@ -769,12 +930,10 @@ async def decode_and_publish(raw_value, source_topic: str, output_topic: str) ->
         decode_args = (final,)
 
     try:
-        # Step 4: Decodifica AIS con pyais in executor (CPU-bound, non blocca event loop)
         loop = asyncio.get_running_loop()
         decoded = await loop.run_in_executor(None, lambda: ais_decode(*decode_args))
         data = decoded.asdict() if hasattr(decoded, "asdict") else dict(decoded)
 
-        # Step 5: Costruzione e pubblicazione evento
         mmsi = data.get("mmsi")
         event = {
             "type": "ais_decoded",
@@ -782,23 +941,23 @@ async def decode_and_publish(raw_value, source_topic: str, output_topic: str) ->
             "mmsi": mmsi,
             "payload": data,
             "timestamp": time.time(),
-            "source": source_topic
+            "source": source_topic,
         }
 
-        # Usa MMSI come partition key: tutti i messaggi della stessa nave
-        # finiscono nella stessa partizione Kafka → ordine garantito per nave
         partition_key = str(mmsi).encode("utf-8") if mmsi else None
 
         t0 = time.time()
-        await asyncio.wait_for(broker.publish(event, topic=output_topic, key=partition_key), timeout=5.0)
+        await asyncio.wait_for(
+            broker.publish(event, topic=output_topic, key=partition_key),
+            timeout=5.0,
+        )
         pub_elapsed = time.time() - t0
         _publish_count += 1
         _publish_total_time += pub_elapsed
         if pub_elapsed > 0.5:
             _publish_slow_count += 1
-            log(f"[PUBLISH SLOW] {pub_elapsed:.2f}s to {output_topic} mmsi={data.get('mmsi')}")
+            log(f"[PUBLISH SLOW] {pub_elapsed:.2f}s → {output_topic} mmsi={mmsi}")
 
-        # Contatore diagnostico
         global _decode_count_main, _decode_count_sim
         if output_topic == SIM_OUTPUT_TOPIC:
             _decode_count_sim += 1
@@ -808,58 +967,76 @@ async def decode_and_publish(raw_value, source_topic: str, output_topic: str) ->
     except asyncio.TimeoutError:
         global _decode_errors
         _decode_errors += 1
-        log(f"[PUBLISH TIMEOUT] 5s timeout publishing to {output_topic}")
+        log(f"[PUBLISH TIMEOUT] 5s timeout → {output_topic}")
     except Exception as e:
         _decode_errors += 1
-        log(f"[DECODE ERROR] Errore decodifica AIS: {e}")
+        log(f"[DECODE ERROR] {e}")
 
 
 # =============================================================================
 # SUBSCRIBER KAFKA
 # =============================================================================
-# I subscriber vengono registrati condizionalmente in base a DECODER_MODE.
-# Con DECODER_MODE='sim' viene creato SOLO il subscriber per la simulazione,
-# eliminando completamente la contesa con il traffico AIS reale.
+# Registrati condizionalmente in base a DECODER_MODE.
+# DECODER_MODE=main → solo handle_main_ais (container produzione AIS reale)
+# DECODER_MODE=sim  → solo handle_sim_ais  (container dedicato simulazione)
+# DECODER_MODE=all  → entrambi            (sviluppo / test locale)
 
 if DECODER_MODE in ("all", "main"):
-    @broker.subscriber(MAIN_INPUT_TOPIC)
+    @broker.subscriber(
+        MAIN_INPUT_TOPIC,
+        description=(
+            "Consuma messaggi NMEA/AIVDM grezzi dal topic **`ais.raw`** "
+            "prodotti dal ricevitore AIS hardware (via Kafka Connector o feeder diretto).\n\n"
+            "**Altri consumer dello stesso topic:**\n"
+            "- `bridge-banchina` — calcola ETA per banchina\n"
+            "- `bridge-components` — traccia utilizzo componenti\n"
+            "- `bridge-delta-eta` — calcola scostamento ETA schedulata\n"
+            "- `bridge-arrivo` — rileva arrivo a destinazione (geofencing)\n\n"
+            "**Formato input:** bytes UTF-8 contenente stringa NMEA/AIVDM, "
+            "oppure JSON wrapper da Kafka Connect "
+            "(`{\"fields\": {\"value\": \"!AIVDM,...\"}}`). "
+            "Gestisce anche messaggi bundled multipart separati da `\\n`.\n\n"
+            "**Attivo quando:** `DECODER_MODE = all | main`."
+        ),
+    )
     async def handle_main_ais(msg: KafkaMessage):
         """
-        Subscriber per il topic AIS principale (dati reali).
-
-        Consuma messaggi NMEA grezzi da ``ais.raw``, decodifica e pubblica
-        su ``ais_decoded.raw``. Attivo quando ``DECODER_MODE`` è ``all`` o ``main``.
-
-        Parameters
-        ----------
-        msg : KafkaMessage
-            Messaggio Kafka contenente dati AIS reali in formato NMEA/AIVDM
+        Subscriber AIS reale: normalizza, decodifica e pubblica su ais_decoded.raw.
         """
         try:
             await decode_and_publish(msg.body, MAIN_INPUT_TOPIC, MAIN_OUTPUT_TOPIC)
         except Exception as e:
-            log(f"[SUBSCRIBER ERROR] MAIN topic: {e}")
+            log(f"[SUBSCRIBER ERROR] MAIN: {e}")
         await msg.ack()
 
+
 if DECODER_MODE in ("all", "sim"):
-    @broker.subscriber(SIM_INPUT_TOPIC)
+    @broker.subscriber(
+        SIM_INPUT_TOPIC,
+        description=(
+            "Consuma messaggi NMEA/AIVDM grezzi dal topic **`ais_simulation.raw`** "
+            "prodotti dal servizio di simulazione AIS.\n\n"
+            "**Altri consumer dello stesso topic:**\n"
+            "- `bridge-banchina` — ETA per banchina (simulazione)\n"
+            "- `bridge-components` — utilizzo componenti (simulazione)\n"
+            "- `bridge-delta-eta` — scostamento ETA (simulazione)\n"
+            "- `bridge-arrivo` — geofencing arrivo (simulazione)\n\n"
+            "**Formato input:** identico a `ais.raw`. Il simulatore invia spesso "
+            "messaggi Tipo 5 (multipart) bundled come singolo messaggio Kafka "
+            "con i due frammenti separati da `\\n`.\n\n"
+            "**Frequenza:** configurabile nel simulatore — tipicamente più alta "
+            "del reale per accelerare i test (es. 10× velocità reale).\n\n"
+            "**Attivo quando:** `DECODER_MODE = all | sim`."
+        ),
+    )
     async def handle_sim_ais(msg: KafkaMessage):
         """
-        Subscriber per il topic AIS simulazione.
-
-        Consuma messaggi NMEA grezzi da ``ais_simulation.raw``, decodifica e
-        pubblica su ``ais_decoded_simulation.raw``. Attivo quando ``DECODER_MODE``
-        è ``all`` o ``sim``.
-
-        Parameters
-        ----------
-        msg : KafkaMessage
-            Messaggio Kafka contenente dati AIS simulati in formato NMEA/AIVDM
+        Subscriber AIS simulazione: normalizza, decodifica e pubblica su ais_decoded_simulation.raw.
         """
         try:
             await decode_and_publish(msg.body, SIM_INPUT_TOPIC, SIM_OUTPUT_TOPIC)
         except Exception as e:
-            log(f"[SUBSCRIBER ERROR] SIM topic: {e}")
+            log(f"[SUBSCRIBER ERROR] SIM: {e}")
         await msg.ack()
 
 
@@ -870,45 +1047,33 @@ if DECODER_MODE in ("all", "sim"):
 @app.on_startup
 async def on_startup():
     """
-    Hook eseguito all'avvio dell'applicazione FastStream.
-
-    Logga la configurazione corrente e avvia il task periodico di cleanup
-    del buffer multipart e di diagnostica.
+    Hook eseguito all'avvio: loga la configurazione e avvia il cleanup periodico.
     """
     log("=" * 60)
-    log("AIS DECODER FASTSTREAM - Avvio")
+    log("AIS DECODER FASTSTREAM v2.1.0 — Avvio")
     log("=" * 60)
-    log(f"Kafka Bootstrap: {BOOTSTRAP_SERVERS}")
-    log(f"Decoder Mode:    {DECODER_MODE}")
-    log(f"Topic Input:     {MAIN_INPUT_TOPIC}, {SIM_INPUT_TOPIC}")
-    log(f"Topic Output:    {MAIN_OUTPUT_TOPIC}, {SIM_OUTPUT_TOPIC}")
-    log(f"Multipart TTL:   {MULTIPART_TTL_SEC}s")
-
-    # Avvia cleanup periodico come task asincrono indipendente
+    log(f"Kafka Bootstrap:  {BOOTSTRAP_SERVERS}")
+    log(f"Decoder Mode:     {DECODER_MODE}")
+    log(f"Input Topics:     {MAIN_INPUT_TOPIC}, {SIM_INPUT_TOPIC}")
+    log(f"Output Topics:    {MAIN_OUTPUT_TOPIC}, {SIM_OUTPUT_TOPIC}")
+    log(f"Multipart TTL:    {MULTIPART_TTL_SEC}s")
     asyncio.create_task(_periodic_cleanup_loop())
-    log("Cleanup periodico multipart buffer avviato (ogni 10s)")
+    log("Task cleanup/diagnostica avviato (ogni 10s cleanup, ogni 30s log)")
 
 
 @app.after_startup
 async def after_startup():
-    """
-    Hook eseguito dopo che tutti i subscriber sono attivi.
-
-    Conferma che il worker è pronto per elaborare messaggi.
-    """
-    log("AIS Decoder FastStream pronto e in ascolto!")
+    """Hook eseguito dopo che tutti i subscriber sono attivi."""
+    log("Worker pronto — in ascolto sui topic configurati.")
     log("=" * 60)
 
 
 @app.on_shutdown
 async def on_shutdown():
-    """
-    Hook eseguito allo shutdown dell'applicazione.
-
-    Esegue cleanup delle risorse e logga lo stato finale del buffer multipart.
-    """
-    log("AIS Decoder FastStream - Shutdown in corso...")
-    log(f"Buffer multipart residuo: {len(multipart_buffer)} chiavi")
+    """Hook eseguito allo shutdown: logga lo stato del buffer multipart."""
+    log("Shutdown in corso...")
+    log(f"Buffer multipart residuo: {len(multipart_buffer)} chiavi, "
+        f"{sum(len(q) for q in multipart_buffer.values())} entry")
 
 
 # =============================================================================

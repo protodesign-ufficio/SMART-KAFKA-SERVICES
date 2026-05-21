@@ -102,6 +102,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 import requests
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
+from faststream.specification import AsyncAPI, Contact, Tag
 from pydantic import BaseModel, Field
 from pyais import decode as ais_decode
 
@@ -160,7 +161,63 @@ GEOFENCE_CHECK_INTERVAL_SEC: float = float(os.getenv("GEOFENCE_CHECK_INTERVAL_SE
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+_spec = AsyncAPI(
+    broker,
+    title="Bridge Arrivo",
+    version="2.0.0",
+    description=(
+        "**Worker di rilevamento arrivo nave a destinazione tramite geofencing.**\n\n"
+        "Consuma posizioni AIS grezze dai topic `ais.raw` (traffico reale) e `ais_simulation.raw` "
+        "(traffico simulato). Ogni messaggio viene elaborato ultra-velocemente: solo store della "
+        "posizione in memoria + ack. Un task asincrono separato (`geofence_check_loop`) valuta "
+        "periodicamente se le navi sono entrate nel geofence di destinazione.\n\n"
+        "**Macchina a stati per nave:**\n"
+        "```\n"
+        "navigating ──► arriving ──► arrived\n"
+        "```\n"
+        "Una nave passa a `arrived` dopo `ARRIVAL_CONFIRM_COUNT` check periodici consecutivi "
+        "all'interno del raggio `GEOFENCE_RADIUS_M` dalla destinazione. Al raggiungimento dello "
+        "stato `arrived` viene eseguita una chiamata REST:\n"
+        "`PATCH /assegnazione/{assegnazione_id}/stato` con `{\"stato_esecuzione\": \"COMPLETATA\"}`\n\n"
+        "**Architettura event bus:**\n"
+        "```\n"
+        "ais.raw             ──┐\n"
+        "                      ├──► bridge-arrivo ──► PATCH /assegnazione/{id}/stato\n"
+        "ais_simulation.raw  ──┘         │\n"
+        "                                └──► GET /percorso/by_mmsi/{mmsi} (cache rotte)\n"
+        "```\n\n"
+        "**Parametri chiave:**\n"
+        "- `GEOFENCE_RADIUS_M` — raggio geofence in metri (default 500m)\n"
+        "- `ARRIVAL_CONFIRM_COUNT` — check consecutivi per confermare arrivo (default 3)\n"
+        "- `GEOFENCE_CHECK_INTERVAL_SEC` — intervallo check geofencing in secondi (default 5s)\n"
+        "- `ROUTE_CACHE_TTL_SEC` — TTL cache rotte in secondi (default 600s)\n"
+        "- `SHIP_INACTIVE_TIMEOUT_SEC` — timeout rimozione nave inattiva (default 300s)\n\n"
+        "**Output:** nessun topic Kafka — il risultato è una chiamata REST al backend."
+    ),
+    tags=[
+        Tag(
+            name="Geofencing Arrivo",
+            description=(
+                "Rilevamento ingresso nave nel geofence di destinazione. "
+                "Usa distanza haversine tra posizione AIS e coordinate banchina."
+            ),
+        ),
+        Tag(
+            name="AIS Reale",
+            description="Messaggi NMEA/AIVDM dal traffico marittimo reale via topic `ais.raw`.",
+        ),
+        Tag(
+            name="AIS Simulazione",
+            description=(
+                "Messaggi AIS generati dal simulatore via topic `ais_simulation.raw`. "
+                "Consente test del geofencing e della state machine senza navi reali."
+            ),
+        ),
+    ],
+    contact=Contact(name="Team AIS Analytics"),
+)
+
+app = FastStream(broker, specification=_spec)
 """FastStream: Applicazione principale FastStream"""
 
 
@@ -810,21 +867,47 @@ async def _store_position(msg: KafkaMessage, source: Literal["real", "simulation
 # SUBSCRIBER KAFKA
 # =============================================================================
 
-@broker.subscriber(MAIN_TOPIC)
+@broker.subscriber(
+    MAIN_TOPIC,
+    description=(
+        "Consuma messaggi NMEA/AIVDM grezzi dal topic **`ais.raw`** (traffico AIS reale).\n\n"
+        "Elaborazione ultra-leggera: il subscriber estrae MMSI e posizione dal frame NMEA tramite "
+        "`pyais`, salva la posizione nel buffer in-memory `_latest_positions`, e restituisce "
+        "l'ack immediatamente. Il geofencing reale viene eseguito dal task asincrono "
+        "`geofence_check_loop` ogni `GEOFENCE_CHECK_INTERVAL_SEC` secondi.\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica su `ais_decoded.raw`)\n"
+        "- `bridge-banchina` (aggregazione per banchina)\n"
+        "- `bridge-deltaeta` (calcolo delta ETA)\n"
+        "- `bridge-components` (tracciamento componenti)\n\n"
+        "**Formato messaggio:** stringa NMEA AIVDM.\n\n"
+        "**Frequenza tipica:** 1–10 msg/s. Il subscriber è dimensionato per non bloccare mai."
+    ),
+)
 async def ais_consumer_real(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS principale (dati reali).
-    Ultra-leggero: salva posizione e ack immediato.
-    """
+    """Subscriber ais.raw — salva posizione per geofencing (dati reali)."""
     await _store_position(msg, source="real")
 
 
-@broker.subscriber(SIM_TOPIC)
+@broker.subscriber(
+    SIM_TOPIC,
+    description=(
+        "Consuma messaggi AIS simulati dal topic **`ais_simulation.raw`**.\n\n"
+        "Identico al canale reale: store posizione + ack immediato. Consente di testare la "
+        "state machine di geofencing (navigating → arriving → arrived) e la chiamata REST di "
+        "completamento assegnazione senza navi reali.\n\n"
+        "**Formato messaggio:** JSON con campo `body` contenente frame AIVDM, oppure stringa NMEA "
+        "diretta (normalizzazione automatica).\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica simulazione)\n"
+        "- `bridge-banchina` (aggregazione simulazione)\n"
+        "- `bridge-deltaeta` (delta ETA simulazione)\n"
+        "- `bridge-components` (componenti simulazione)\n\n"
+        "**Frequenza tipica:** controllata dal simulatore, configurabile via dashboard."
+    ),
+)
 async def ais_consumer_sim(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS simulazione.
-    Ultra-leggero: salva posizione e ack immediato.
-    """
+    """Subscriber ais_simulation.raw — salva posizione per geofencing (dati simulati)."""
     await _store_position(msg, source="simulation")
 
 

@@ -81,6 +81,7 @@ from typing import Any, Dict, Literal, Optional, Tuple
 import requests
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
+from faststream.specification import AsyncAPI, Contact, Tag
 from pydantic import BaseModel, Field
 from pyais import decode as ais_decode
 
@@ -135,7 +136,56 @@ COMPONENT_CACHE_TTL_SEC = float(os.getenv("COMPONENT_CACHE_TTL_SEC", "300"))
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+_spec = AsyncAPI(
+    broker,
+    title="Bridge Components",
+    version="2.0.0",
+    description=(
+        "**Worker di tracciamento utilizzo componenti di bordo per nave.**\n\n"
+        "Consuma posizioni AIS grezze dai topic `ais.raw` (traffico reale) e `ais_simulation.raw` "
+        "(traffico simulato). Per ogni nave con SOG > 0.1 nodi, interroga il backend REST "
+        "(`GET /componente/by_mmsi/{mmsi}`) per ottenere la lista dei componenti installati.\n\n"
+        "Accumula il tempo di utilizzo (`usage_seconds_total`) per ciascuna coppia "
+        "(MMSI, componente) e ogni `PUBLISH_INTERVAL_SEC` secondi pubblica su `analytics_ais.raw` "
+        "un evento `ComponentUsageEvent` per ogni componente attivo.\n\n"
+        "**Architettura event bus:**\n"
+        "```\n"
+        "ais.raw             ──┐\n"
+        "                      ├──► bridge-components ──► analytics_ais.raw\n"
+        "ais_simulation.raw  ──┘          │\n"
+        "                                 └──► GET /componente/by_mmsi/{mmsi}\n"
+        "```\n\n"
+        "**Parametri chiave:**\n"
+        "- `PUBLISH_INTERVAL_SEC` — intervallo emissione eventi (da dashboard)\n"
+        "- `COMPONENT_CACHE_TTL_SEC` — TTL cache componenti (default 300s)\n"
+        "- `EMPTY_COMPONENTS_RETRY_SEC` — retry per MMSI senza componenti (default 60s)\n"
+        "- `COMPONENT_API_TIMEOUT_SEC` — timeout HTTP verso backend (default 10s)\n\n"
+        "**Consumer di `analytics_ais.raw`:** backend per storico utilizzo componenti, dashboard manutenzione."
+    ),
+    tags=[
+        Tag(
+            name="Componenti Bordo",
+            description=(
+                "Tracciamento tempo di attività per ciascun componente installato su ogni nave. "
+                "Un componente è 'attivo' quando la nave è in movimento (SOG > 0.1 nodi)."
+            ),
+        ),
+        Tag(
+            name="AIS Reale",
+            description="Messaggi NMEA/AIVDM dal traffico marittimo reale via topic `ais.raw`.",
+        ),
+        Tag(
+            name="AIS Simulazione",
+            description=(
+                "Messaggi AIS generati dal simulatore via topic `ais_simulation.raw`. "
+                "Consente test dell'accumulo ore senza navi reali."
+            ),
+        ),
+    ],
+    contact=Contact(name="Team AIS Analytics"),
+)
+
+app = FastStream(broker, specification=_spec)
 """FastStream: Applicazione principale FastStream"""
 
 
@@ -232,9 +282,27 @@ class ComponentUsageEvent(BaseModel):
 # Publisher Stub per documentazione AsyncAPI
 # -----------------------------------------------------------------------------
 
-@broker.publisher(OUTPUT_TOPIC)
+@broker.publisher(
+    OUTPUT_TOPIC,
+    description=(
+        "Pubblica eventi `ComponentUsageEvent` JSON su **`analytics_ais.raw`**.\n\n"
+        "Ogni evento rappresenta il tempo di utilizzo accumulato per un singolo componente "
+        "installato su una nave. La pubblicazione avviene ogni `PUBLISH_INTERVAL_SEC` secondi "
+        "(da dashboard) e genera un evento separato per ciascuna coppia (MMSI, componente) "
+        "attiva (SOG > 0.1 nodi).\n\n"
+        "I dati componente vengono recuperati via REST (`GET /componente/by_mmsi/{mmsi}`) con "
+        "cache TTL `COMPONENT_CACHE_TTL_SEC` (default 300s) per ridurre il carico sul backend.\n\n"
+        "**Consumer tipici:**\n"
+        "- Backend per storico utilizzo e report manutenzione\n"
+        "- Dashboard ore operative per componente\n"
+        "- Sistemi di manutenzione predittiva\n\n"
+        "**Payload chiave:** `mmsi`, `component`, `usage_seconds_total`, `active`, "
+        "`source` (`real` | `simulation`), `timestamp`.\n\n"
+        "**Latenza tipica:** < 150 ms (include lookup cache componenti)."
+    ),
+)
 async def _doc_component_usage() -> ComponentUsageEvent:
-    """Publisher stub per documentazione AsyncAPI."""
+    """Publisher stub — analytics_ais.raw (utilizzo componenti bordo)."""
     ...
 
 
@@ -591,30 +659,48 @@ async def process_ais_message(topic: str, raw_bytes) -> None:
 # SUBSCRIBER KAFKA
 # =============================================================================
 
-@broker.subscriber(MAIN_TOPIC)
+@broker.subscriber(
+    MAIN_TOPIC,
+    description=(
+        "Consuma messaggi NMEA/AIVDM grezzi dal topic **`ais.raw`** (traffico AIS reale).\n\n"
+        "Per ogni messaggio: decodifica il frame NMEA tramite `pyais`, verifica se la nave è in "
+        "movimento (SOG > 0.1 nodi), recupera la lista componenti installati via REST "
+        "(`GET /componente/by_mmsi/{mmsi}`) con cache TTL `COMPONENT_CACHE_TTL_SEC`, e aggiorna "
+        "il contatore `usage_seconds_total` per ciascun componente attivo.\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica su `ais_decoded.raw`)\n"
+        "- `bridge-banchina` (aggregazione per banchina)\n"
+        "- `bridge-deltaeta` (calcolo delta ETA)\n"
+        "- `bridge-arrivo` (geofencing arrivo)\n\n"
+        "**Formato messaggio:** stringa NMEA AIVDM.\n\n"
+        "**Frequenza tipica:** 1–10 msg/s in condizioni normali di traffico portuale."
+    ),
+)
 async def consume_main(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS principale (dati reali).
-    
-    Parameters
-    ----------
-    msg : KafkaMessage
-        Messaggio Kafka contenente dati AIS reali
-    """
+    """Subscriber ais.raw — dati AIS reali per tracciamento componenti."""
     await process_ais_message(MAIN_TOPIC, msg.body)
     await msg.ack()
 
 
-@broker.subscriber(SIM_TOPIC)
+@broker.subscriber(
+    SIM_TOPIC,
+    description=(
+        "Consuma messaggi AIS simulati dal topic **`ais_simulation.raw`**.\n\n"
+        "Identico al canale reale nel tracciamento componenti. Consente di simulare l'accumulo "
+        "ore operative dei componenti senza navi reali. Gli eventi prodotti avranno "
+        "`source: simulation`.\n\n"
+        "**Formato messaggio:** JSON con campo `body` contenente frame AIVDM, oppure stringa NMEA "
+        "diretta (normalizzazione automatica).\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica simulazione)\n"
+        "- `bridge-banchina` (aggregazione simulazione)\n"
+        "- `bridge-deltaeta` (delta ETA simulazione)\n"
+        "- `bridge-arrivo` (geofencing simulazione)\n\n"
+        "**Frequenza tipica:** controllata dal simulatore, configurabile via dashboard."
+    ),
+)
 async def consume_sim(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS simulazione.
-    
-    Parameters
-    ----------
-    msg : KafkaMessage
-        Messaggio Kafka contenente dati AIS simulati
-    """
+    """Subscriber ais_simulation.raw — dati AIS simulati per tracciamento componenti."""
     await process_ais_message(SIM_TOPIC, msg.body)
     await msg.ack()
 

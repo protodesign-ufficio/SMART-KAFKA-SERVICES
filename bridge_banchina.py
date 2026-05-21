@@ -90,6 +90,7 @@ from typing import Optional, Dict, List, Any, Tuple
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
+from faststream.specification import AsyncAPI, Contact, Tag
 from pyais import decode as ais_decode
 from pydantic import BaseModel, Field
 
@@ -137,7 +138,53 @@ SIM_TOPIC = "ais_simulation.raw"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+_spec = AsyncAPI(
+    broker,
+    title="Bridge Banchina",
+    version="2.0.0",
+    description=(
+        "**Worker di aggregazione navi in arrivo per banchina.**\n\n"
+        "Consuma posizioni AIS grezze dai topic `ais.raw` (traffico reale) e `ais_simulation.raw` "
+        "(traffico simulato), decodifica i frame NMEA/AIVDM tramite `pyais`, e aggrega le navi "
+        "filtrandole per finestra temporale ETA (`WINDOW_FUTURE_MIN`) e destinazione/banchina.\n\n"
+        "Ogni `PUBLISH_INTERVAL` secondi pubblica su `analytics_ais.raw` un evento "
+        "`BerthIncomingEvent` contenente la lista ordinata per ETA delle navi in arrivo verso "
+        "ciascuna banchina.\n\n"
+        "**Architettura event bus:**\n"
+        "```\n"
+        "ais.raw             ──┐\n"
+        "                      ├──► bridge-banchina ──► analytics_ais.raw\n"
+        "ais_simulation.raw  ──┘\n"
+        "```\n\n"
+        "**Parametri chiave (da dashboard):**\n"
+        "- `WINDOW_FUTURE_MIN` — finestra ETA in minuti (es. 120 min)\n"
+        "- `PUBLISH_INTERVAL` — intervallo emissione eventi in secondi (es. 30s)\n\n"
+        "**Consumer di `analytics_ais.raw`:** backend applicativo, dashboard, sistemi di notifica."
+    ),
+    tags=[
+        Tag(
+            name="Aggregazione Banchina",
+            description=(
+                "Logica di raggruppamento navi per banchina/destinazione. "
+                "Ogni evento elenca le navi in arrivo ordinate per ETA crescente."
+            ),
+        ),
+        Tag(
+            name="AIS Reale",
+            description="Messaggi NMEA/AIVDM dal traffico marittimo reale via topic `ais.raw`.",
+        ),
+        Tag(
+            name="AIS Simulazione",
+            description=(
+                "Messaggi AIS generati dal simulatore via topic `ais_simulation.raw`. "
+                "Supporta test e demo senza traffico reale."
+            ),
+        ),
+    ],
+    contact=Contact(name="Team AIS Analytics"),
+)
+
+app = FastStream(broker, specification=_spec)
 """FastStream: Applicazione principale FastStream"""
 
 # =============================================================================
@@ -236,9 +283,25 @@ class BerthIncomingEvent(BaseModel):
 # Publisher Stub per documentazione AsyncAPI
 # -----------------------------------------------------------------------------
 
-@broker.publisher(ANALYTICS_TOPIC)
+@broker.publisher(
+    ANALYTICS_TOPIC,
+    description=(
+        "Pubblica eventi `BerthIncomingEvent` JSON su **`analytics_ais.raw`**.\n\n"
+        "Ogni evento contiene la lista delle navi in arrivo verso una banchina specifica, "
+        "ordinate per ETA crescente. La pubblicazione avviene ogni `PUBLISH_INTERVAL` secondi "
+        "(default da dashboard, es. 30s) per ciascuna banchina con almeno una nave nella finestra "
+        "temporale `WINDOW_FUTURE_MIN`.\n\n"
+        "**Consumer tipici:**\n"
+        "- Backend applicativo (storicizzazione e notifiche)\n"
+        "- Dashboard real-time banchina\n"
+        "- Sistemi di alerting operativo\n\n"
+        "**Payload chiave:** `berth_id`, `berth_name`, `incoming` (lista navi con MMSI, ETA, SOG), "
+        "`source` (`real` | `simulation`), `timestamp`.\n\n"
+        "**Latenza tipica:** < 100 ms dal ricevimento posizione alla pubblicazione evento."
+    ),
+)
 async def _doc_berth_incoming() -> BerthIncomingEvent:
-    """Publisher stub per documentazione AsyncAPI - Eventi banchina."""
+    """Publisher stub — analytics_ais.raw (eventi banchina)."""
     ...
 
 # =============================================================================
@@ -631,30 +694,46 @@ async def process_ais(topic: str, raw_bytes) -> None:
 # SUBSCRIBER KAFKA
 # =============================================================================
 
-@broker.subscriber(MAIN_TOPIC)
+@broker.subscriber(
+    MAIN_TOPIC,
+    description=(
+        "Consuma messaggi NMEA/AIVDM grezzi dal topic **`ais.raw`** (traffico AIS reale).\n\n"
+        "Ogni messaggio contiene un frame AIVDM con posizione, SOG, COG e MMSi della nave. "
+        "Il bridge decodifica il frame tramite `pyais`, aggiorna il database in-memory delle navi "
+        "e calcola se la nave rientra nella finestra ETA `WINDOW_FUTURE_MIN` per una banchina.\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica e normalizza su `ais_decoded.raw`)\n"
+        "- `bridge-deltaeta` (calcolo delta ETA)\n"
+        "- `bridge-components` (tracciamento componenti bordo)\n"
+        "- `bridge-arrivo` (geofencing arrivo)\n\n"
+        "**Formato messaggio:** stringa NMEA AIVDM (es. `!AIVDM,1,1,,A,13HOI...`).\n\n"
+        "**Frequenza tipica:** 1–10 msg/s in condizioni normali di traffico portuale."
+    ),
+)
 async def consume_main(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS principale (dati reali).
-    
-    Parameters
-    ----------
-    msg : KafkaMessage
-        Messaggio Kafka contenente dati AIS reali
-    """
+    """Subscriber ais.raw — dati AIS reali."""
     await process_ais(MAIN_TOPIC, msg.body)
     await msg.ack()
 
 
-@broker.subscriber(SIM_TOPIC)
+@broker.subscriber(
+    SIM_TOPIC,
+    description=(
+        "Consuma messaggi AIS simulati dal topic **`ais_simulation.raw`**.\n\n"
+        "Identico al canale reale nel processamento, ma i messaggi provengono dal simulatore AIS "
+        "interno. Gli eventi prodotti avranno `source: simulation` nel payload di output.\n\n"
+        "**Formato messaggio:** JSON con campo `body` contenente frame AIVDM, oppure stringa NMEA "
+        "diretta (il bridge normalizza entrambi i formati).\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica simulazione)\n"
+        "- `bridge-deltaeta` (delta ETA simulazione)\n"
+        "- `bridge-components` (componenti simulazione)\n"
+        "- `bridge-arrivo` (geofencing simulazione)\n\n"
+        "**Frequenza tipica:** controllata dal simulatore, configurabile via dashboard."
+    ),
+)
 async def consume_sim(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS simulazione.
-    
-    Parameters
-    ----------
-    msg : KafkaMessage
-        Messaggio Kafka contenente dati AIS simulati
-    """
+    """Subscriber ais_simulation.raw — dati AIS simulati."""
     await process_ais(SIM_TOPIC, msg.body)
     await msg.ack()
 

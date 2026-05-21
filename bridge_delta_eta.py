@@ -107,6 +107,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 import requests
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaMessage
+from faststream.specification import AsyncAPI, Contact, Tag
 from pydantic import BaseModel, Field
 from pyais import decode as ais_decode
 from datetime import datetime as dt, timedelta
@@ -175,7 +176,58 @@ API_BASE = "http://87.26.178.190:25080"
 broker = KafkaBroker(BOOTSTRAP_SERVERS)
 """KafkaBroker: Istanza del broker Kafka"""
 
-app = FastStream(broker)
+_spec = AsyncAPI(
+    broker,
+    title="Bridge Delta ETA",
+    version="2.0.0",
+    description=(
+        "**Worker di calcolo Delta ETA (scostamento orario arrivo) per nave.**\n\n"
+        "Consuma posizioni AIS grezze dai topic `ais.raw` (traffico reale) e `ais_simulation.raw` "
+        "(traffico simulato). Per ogni nave con un'assegnazione attiva interroga il backend REST "
+        "(`GET /percorso/by_mmsi/{mmsi}`) per ottenere ETA attesa e tempo di percorrenza.\n\n"
+        "Calcola: `delta_min = (ETA_AIS - ETA_attesa) / 60`\n\n"
+        "- **delta_min > 0** → nave in ritardo\n"
+        "- **delta_min < 0** → nave in anticipo\n"
+        "- **delta_min ≈ 0** → in orario\n\n"
+        "Per la simulazione divide il tempo di percorrenza per `SIM_SPEED_FACTOR` per simulare "
+        "accelerazioni temporali. Ogni `PUBLISH_INTERVAL` secondi pubblica su `analytics_ais.raw` "
+        "un evento `DeltaEtaEvent` per ciascuna nave tracciata.\n\n"
+        "**Architettura event bus:**\n"
+        "```\n"
+        "ais.raw             ──┐\n"
+        "                      ├──► bridge-deltaeta ──► analytics_ais.raw\n"
+        "ais_simulation.raw  ──┘         │\n"
+        "                                └──► GET /percorso/by_mmsi/{mmsi}\n"
+        "```\n\n"
+        "**Parametri chiave:**\n"
+        "- `SIM_SPEED_FACTOR` — moltiplicatore velocità simulazione (da dashboard)\n"
+        "- `PUBLISH_INTERVAL` — intervallo emissione eventi in secondi\n\n"
+        "**Consumer di `analytics_ais.raw`:** backend applicativo, dashboard real-time, alerting."
+    ),
+    tags=[
+        Tag(
+            name="Delta ETA",
+            description=(
+                "Calcolo scostamento tra ETA stimata da AIS e orario atteso da pianificazione. "
+                "Campo `delta_min` positivo = ritardo, negativo = anticipo."
+            ),
+        ),
+        Tag(
+            name="AIS Reale",
+            description="Messaggi NMEA/AIVDM dal traffico marittimo reale via topic `ais.raw`.",
+        ),
+        Tag(
+            name="AIS Simulazione",
+            description=(
+                "Messaggi AIS generati dal simulatore. Il tempo percorrenza viene diviso per "
+                "`SIM_SPEED_FACTOR` per comprimere il tempo simulato."
+            ),
+        ),
+    ],
+    contact=Contact(name="Team AIS Analytics"),
+)
+
+app = FastStream(broker, specification=_spec)
 """FastStream: Applicazione principale FastStream"""
 
 
@@ -281,9 +333,28 @@ class DeltaEtaEvent(BaseModel):
 # Publisher Stub per documentazione AsyncAPI
 # -----------------------------------------------------------------------------
 
-@broker.publisher(ANALYTICS_TOPIC)
+@broker.publisher(
+    ANALYTICS_TOPIC,
+    description=(
+        "Pubblica eventi `DeltaEtaEvent` JSON su **`analytics_ais.raw`**.\n\n"
+        "Ogni evento rappresenta lo scostamento ETA per una singola nave rispetto all'orario "
+        "pianificato. La pubblicazione avviene ogni `PUBLISH_INTERVAL` secondi per tutte le "
+        "navi con un'assegnazione attiva nel backend.\n\n"
+        "**Interpretazione `delta_min`:**\n"
+        "- `delta_min > 0` → nave in ritardo (ETA AIS supera l'ETA attesa)\n"
+        "- `delta_min < 0` → nave in anticipo\n"
+        "- `delta_min ≈ 0` → puntuale\n\n"
+        "**Consumer tipici:**\n"
+        "- Backend applicativo (storicizzazione scostamenti)\n"
+        "- Dashboard KPI puntualità\n"
+        "- Sistemi di alerting per ritardi critici\n\n"
+        "**Payload chiave:** `mmsi`, `delta_min`, `eta_ais`, `eta_attesa`, "
+        "`source` (`real` | `simulation`), `sim_speed_factor`, `timestamp`.\n\n"
+        "**Latenza tipica:** < 200 ms (include chiamata REST al backend per dati percorso)."
+    ),
+)
 async def _doc_delta_eta() -> DeltaEtaEvent:
-    """Publisher stub per documentazione AsyncAPI."""
+    """Publisher stub — analytics_ais.raw (delta ETA nave)."""
     ...
 
 # =============================================================================
@@ -927,27 +998,46 @@ async def process_ais_message(
 # SUBSCRIBER KAFKA
 # =============================================================================
 
-@broker.subscriber(MAIN_TOPIC)
+@broker.subscriber(
+    MAIN_TOPIC,
+    description=(
+        "Consuma messaggi NMEA/AIVDM grezzi dal topic **`ais.raw`** (traffico AIS reale).\n\n"
+        "Per ogni messaggio: decodifica il frame NMEA tramite `pyais`, estrae MMSI e posizione, "
+        "interroga il backend REST (`GET /percorso/by_mmsi/{mmsi}`) per ottenere ETA attesa e "
+        "tempo di percorrenza, calcola `delta_min = (ETA_AIS - ETA_attesa) / 60`.\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica su `ais_decoded.raw`)\n"
+        "- `bridge-banchina` (aggregazione per banchina)\n"
+        "- `bridge-components` (tracciamento componenti)\n"
+        "- `bridge-arrivo` (geofencing arrivo)\n\n"
+        "**Formato messaggio:** stringa NMEA AIVDM.\n\n"
+        "**Frequenza tipica:** 1–10 msg/s in condizioni normali di traffico portuale."
+    ),
+)
 async def ais_consumer_real(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS principale (dati reali).
-    
-    Processa messaggi con source="real" per calcolare delta ETA
-    basato su orari schedulati dal backend.
-    
-    Parameters
-    ----------
-    msg : KafkaMessage
-        Messaggio Kafka contenente dati AIS reali
-    """
+    """Subscriber ais.raw — dati AIS reali per calcolo delta ETA."""
     await process_ais_message(msg, source="real", topic_override=MAIN_TOPIC)
 
 
-@broker.subscriber(SIM_TOPIC)
+@broker.subscriber(
+    SIM_TOPIC,
+    description=(
+        "Consuma messaggi AIS simulati dal topic **`ais_simulation.raw`**.\n\n"
+        "Identico al canale reale nel calcolo del delta ETA, ma applica la correzione temporale "
+        "della simulazione: `tempo_percorrenza /= SIM_SPEED_FACTOR`. Questo permette di comprimere "
+        "percorsi che richiederebbero ore reali in pochi minuti simulati.\n\n"
+        "Gli eventi prodotti avranno `source: simulation` e `sim_speed_factor` valorizzato.\n\n"
+        "**Altri consumer dello stesso topic:**\n"
+        "- `decoder-ais-faststream` (decodifica simulazione)\n"
+        "- `bridge-banchina` (aggregazione simulazione)\n"
+        "- `bridge-components` (componenti simulazione)\n"
+        "- `bridge-arrivo` (geofencing simulazione)\n\n"
+        "**Frequenza tipica:** controllata dal simulatore, configurabile via dashboard."
+    ),
+)
 async def ais_consumer_sim(msg: KafkaMessage):
-    """
-    Subscriber per il topic AIS simulazione.
-    
+    """Subscriber ais_simulation.raw — dati AIS simulati per calcolo delta ETA.
+
     Processa messaggi con source="simulation" per calcolare delta ETA
     basato sul timestamp di inizio simulazione + tempo percorrenza.
     

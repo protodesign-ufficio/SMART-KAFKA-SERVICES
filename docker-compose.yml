@@ -154,6 +154,19 @@ services:
     networks:
       - kafka-net
 
+  # =======================
+  # DOCS INDEX (porta 9005)
+  # =======================
+  docs-index:
+    image: nginx:alpine
+    ports:
+      - "9005:80"
+    volumes:
+      - ./docs-index.html:/usr/share/nginx/html/index.html:ro
+    restart: unless-stopped
+    networks:
+      - kafka-net
+
 networks:
   kafka-net:
     external: true
